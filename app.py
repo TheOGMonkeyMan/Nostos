@@ -145,6 +145,7 @@ if AUTH_ENABLED:
         "/api/auth/settings",
         "/api/auth/integrations/presets",
         "/api/health",
+        "/healthz",
         "/api/version",
         "/login",
     }
@@ -732,6 +733,18 @@ async def get_version():
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/healthz")
+async def healthz():
+    """Readiness probe: per-component status (db, vector store, search,
+    providers). No auth, lightweight, non-networked. Returns 503 only when the
+    database (the hard dependency) is unreachable so orchestrators can gate on
+    it; otherwise 200 with overall status ok|degraded. Logic lives in
+    core.health so the handler stays thin (engineering-standards)."""
+    from core.health import check_health
+    report = check_health()
+    code = 503 if report["status"] == "error" else 200
+    return _JSONResponse(report, status_code=code)
 
 @app.get("/api/runtime")
 async def runtime_info() -> Dict[str, object]:
