@@ -1,0 +1,204 @@
+from copy import deepcopy
+
+from fastapi import APIRouter
+
+
+def setup_hwfit_routes():
+    router = APIRouter(prefix="/api/hwfit", tags=["hwfit"])
+
+    def _apply_manual_hardware(system, manual_mode="", manual_gpu_count="", manual_vram_gb="", manual_ram_gb="", manual_backend=""):
+        """Manual hardware is a "what if I had this setup" simulator —
+        REPLACES the detected hardware entirely instead of adding to it.
+
+        The previous additive behavior averaged the manual VRAM across
+        all GPUs (base + manual), which meant adding "1× 400 GB" on top
+        of "2× 70 GB" only nudged the per-GPU cap from 70 to 180 GB
+        (= 540 / 3), so GGUF models bigger than that still didn't surface
+        — exactly the "cap stuck at detected level" bug the user hit.
+        """
+        manual_mode = (manual_mode or "").lower()
+        if manual_mode not in {"gpu", "ram"}:
+            return system
+
+        try:
+            override_ram_gb = float(manual_ram_gb) if manual_ram_gb else 0
+        except ValueError:
+            override_ram_gb = 0
+        override_ram_gb = max(0.0, override_ram_gb)
+        if override_ram_gb:
+            # Replace RAM, don't add. The number in the field is the
+            # TOTAL system memory the user wants to simulate.
+            system["available_ram_gb"] = round(override_ram_gb, 1)
+            system["total_ram_gb"] = round(override_ram_gb, 1)
+        system["manual_hardware"] = True
+
+        if manual_mode == "ram":
+            # RAM-only simulation — wipe GPU entirely so the ranker uses
+            # CPU/RAM paths.
+            system["has_gpu"] = False
+            system["gpu_name"] = None
+            system["gpu_vram_gb"] = 0
+            system["gpu_count"] = 0
+            system["gpus"] = []
+            system["gpu_groups"] = []
+            system["backend"] = "cpu_x86"
+            return system
+
+        try:
+            count = int(manual_gpu_count) if manual_gpu_count else 1
+        except ValueError:
+            count = 1
+        try:
+            vram_each = float(manual_vram_gb) if manual_vram_gb else 8.0
+        except ValueError:
+            vram_each = 8.0
+        count = max(1, min(count, 16))
+        vram_each = max(1.0, vram_each)
+        backend = (manual_backend or system.get("backend") or "cuda").lower()
+        if backend not in {"cuda", "rocm", "cpu_x86", "cpu_arm"}:
+            backend = "cuda"
+        total_vram = round(vram_each * count, 1)
+        gpu_name = f"Simulated {backend.upper()} GPU" + (f" × {count}" if count > 1 else "")
+        system["has_gpu"] = True
+        system["gpu_name"] = gpu_name
+        system["gpu_vram_gb"] = total_vram
+        system["gpu_count"] = count
+        system["gpus"] = [
+            {"index": i, "name": gpu_name, "vram_gb": vram_each}
+            for i in range(count)
+        ]
+        # Single homogeneous pool — vram_each here is the ACTUAL per-GPU
+        # VRAM the user entered, not an average. That's the whole point:
+        # raising vram_each lifts the per-GPU cap (GGUF, tensor-parallel
+        # math) all the way up, not just by a small fraction.
+        system["gpu_groups"] = [{
+            "name": gpu_name,
+            "vram_each": vram_each,
+            "count": count,
+            "indices": list(range(count)),
+            "vram_total": total_vram,
+        }]
+        system["homogeneous"] = True
+        system["backend"] = backend
+        return system
+
+    @router.get("/system")
+    def get_system(host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False):
+        """Detect and return current system hardware info. Pass host=user@server for remote.
+        fresh=true bypasses the per-host cache (the Rescan button)."""
+        from services.hwfit.hardware import detect_system
+        return detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh)
+
+    @router.get("/models")
+    def get_models(use_case: str = "", sort: str = "score", limit: int = 50, search: str = "", host: str = "", quant: str = "", gpu_count: str = "", gpu_group: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False):
+        """Rank LLM models against detected hardware and return scored results.
+        gpu_count: override GPU count (0 = CPU only, 1-N = simulate N GPUs of the
+            active group). gpu_group: index into system.gpu_groups (the homogeneous
+            pools) to target — empty/auto = the largest pool. vLLM can only
+            tensor-parallel across identical GPUs, so we never mix pools.
+        fresh=true bypasses the hardware-detection cache."""
+        from services.hwfit.hardware import detect_system
+        from services.hwfit.fit import rank_models
+        from services.hwfit.models import get_models, model_catalog_path
+        system = deepcopy(detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh))
+        if system.get("error"):
+            return {"system": system, "models": [], "error": system["error"]}
+        if not get_models():
+            return {
+                "system": system,
+                "models": [],
+                "error": f"Model catalog missing or empty: {model_catalog_path()}",
+            }
+
+        if ignore_detected_gpu:
+            system["has_gpu"] = False
+            system["gpu_name"] = None
+            system["gpu_vram_gb"] = 0
+            system["gpu_count"] = 0
+            system["gpus"] = []
+            system["gpu_groups"] = []
+        if ignore_detected_ram:
+            system["available_ram_gb"] = 0
+            system["total_ram_gb"] = 0
+
+        system = _apply_manual_hardware(system, manual_mode, manual_gpu_count, manual_vram_gb, manual_ram_gb, manual_backend)
+
+        # Keep the raw detection around so the UI can still show the box's full
+        # GPU complement even while we rank against one homogeneous pool.
+        system["detected_gpu_vram_gb"] = system.get("gpu_vram_gb")
+        system["detected_gpu_count"] = system.get("gpu_count")
+
+        groups = system.get("gpu_groups") or []
+        # Resolve the target homogeneous pool. Default (auto) = the largest pool,
+        # which for a uniform box is simply "all the GPUs" — no behaviour change.
+        grp = None
+        if groups:
+            try:
+                gidx = int(gpu_group) if gpu_group != "" else 0
+            except ValueError:
+                gidx = 0
+            if 0 <= gidx < len(groups):
+                grp = groups[gidx]
+
+        def _apply_group(g, n):
+            n = max(1, min(n, g["count"]))
+            system["gpu_count"] = n
+            system["gpu_vram_gb"] = round(g["vram_each"] * n, 1)
+            system["gpu_name"] = g["name"]
+            system["active_group"] = {**g, "use_count": n}
+
+        if gpu_count != "":
+            n = int(gpu_count)
+            if n == 0:
+                # RAM-only mode: rank against system memory, offload allowed.
+                system["has_gpu"] = False
+                system["gpu_vram_gb"] = 0
+                system["gpu_count"] = 0
+                system["gpu_only"] = False
+                system.pop("active_group", None)
+            elif grp:
+                _apply_group(grp, n)
+                system["gpu_only"] = True
+            else:
+                # No per-GPU detail (older detection) — assume uniform split.
+                single_vram = (system.get("gpu_vram_gb") or 0) / (system.get("gpu_count") or 1)
+                system["gpu_count"] = max(1, n)
+                system["gpu_vram_gb"] = round(single_vram * max(1, n), 1)
+                system["gpu_only"] = True
+        elif grp:
+            # No explicit count, but we still pin to one pool so heterogeneous
+            # boxes rank against a real mixable group, not a fictional VRAM sum.
+            # gpu_only stays off here so the default view still surfaces offload.
+            _apply_group(grp, grp["count"])
+
+        results = rank_models(system, use_case=use_case or None, limit=limit, search=search or None, sort=sort, quant=quant or None)
+        return {"system": system, "models": results}
+
+    @router.get("/image-models")
+    def get_image_models(sort: str = "fit", search: str = "", host: str = "", gpu_count: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False):
+        """Rank image generation models against detected hardware."""
+        from services.hwfit.hardware import detect_system
+        from services.hwfit.image_models import rank_image_models
+        system = deepcopy(detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh))
+        if system.get("error"):
+            return {"system": system, "models": [], "error": system["error"]}
+        if ignore_detected_gpu:
+            system["has_gpu"] = False
+            system["gpu_name"] = None
+            system["gpu_vram_gb"] = 0
+            system["gpu_count"] = 0
+            system["gpus"] = []
+            system["gpu_groups"] = []
+        if ignore_detected_ram:
+            system["available_ram_gb"] = 0
+            system["total_ram_gb"] = 0
+        system = _apply_manual_hardware(system, manual_mode, manual_gpu_count, manual_vram_gb, manual_ram_gb, manual_backend)
+        # Image models use a single GPU — always use per-GPU VRAM
+        gpu_vrams = [float(g.get("vram_gb") or 0) for g in (system.get("gpus") or []) if isinstance(g, dict)]
+        single_vram = max(gpu_vrams) if gpu_vrams else ((system.get("gpu_vram_gb") or 0) / max(system.get("gpu_count") or 1, 1))
+        system["gpu_vram_gb"] = single_vram
+        system["gpu_count"] = 1 if single_vram > 0 else 0
+        results = rank_image_models(system, search=search or None, sort=sort)
+        return {"system": system, "models": results}
+
+    return router

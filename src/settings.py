@@ -1,0 +1,222 @@
+# src/settings.py
+"""Centralized settings and features management.
+
+Single source of truth for reading/writing data/settings.json and data/features.json.
+All modules should import from here instead of accessing files directly.
+"""
+
+import json
+import time
+import logging
+from typing import Any
+
+from src.constants import SETTINGS_FILE, FEATURES_FILE
+
+logger = logging.getLogger(__name__)
+
+# Tiny TTL cache for settings/features. get_setting() is called on hot paths
+# (every chat, every preprocess); without this it re-parses the JSON each call.
+# Picks up edits within _CACHE_TTL seconds, which is fine for human-edited config.
+_CACHE_TTL = 2.0
+_settings_cache: tuple[float, dict] | None = None
+_features_cache: tuple[float, dict] | None = None
+
+def _invalidate_caches():
+    global _settings_cache, _features_cache
+    _settings_cache = None
+    _features_cache = None
+
+# ── Default values ──
+
+DEFAULT_SETTINGS = {
+    "image_gen_enabled": True,
+    "image_model": "",
+    "image_quality": "medium",
+    "vision_model": "",
+    "vision_enabled": True,
+    # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).
+    "vision_model_fallbacks": [],
+    # Public base URL used to build clickable deep-links in outgoing alerts
+    # (e.g., urgency alert email). Example: "https://chat.example.com"
+    "app_public_url": "",
+    "tts_enabled": True,
+    "tts_provider": "disabled",
+    "tts_model": "tts-1",
+    "tts_voice": "alloy",
+    "tts_speed": "1",
+    "stt_enabled": False,
+    "stt_provider": "disabled",
+    "stt_model": "base",
+    "stt_language": "",
+    "search_provider": "searxng",
+    # Default fallback chain — when the primary provider fails or
+    # rate-limits, we try DuckDuckGo next. Free, no API key required, so
+    # safe to ship on by default for every user.
+    "search_fallback_chain": ["duckduckgo"],
+    "search_url": "",
+    "search_result_count": 5,
+    "brave_api_key": "",
+    "google_pse_key": "",
+    "google_pse_cx": "",
+    "tavily_api_key": "",
+    "serper_api_key": "",
+    "research_endpoint_id": "",
+    "research_model": "",
+    "research_search_provider": "",
+    "research_max_tokens": 16384,
+    "research_extraction_timeout_seconds": 90,
+    "research_extraction_concurrency": 3,
+    "agent_max_tool_calls": 0,
+    "agent_input_token_budget": 6000,
+    "agent_stream_timeout_seconds": 300,
+    "task_endpoint_id": "",
+    "task_model": "",
+    "default_endpoint_id": "",
+    "default_model": "",
+    # Ordered fallback chain for the default chat model. Each entry is
+    # {"endpoint_id": "...", "model": "..."}. If the primary model fails
+    # before producing output (endpoint offline / errors), the chat
+    # dispatch retries the next entry in order.
+    "default_model_fallbacks": [],
+    "utility_endpoint_id": "",
+    "utility_model": "",
+    # Ordered fallback chain for the Utility model (summarization, naming,
+    # tidy actions, etc.).
+    "utility_model_fallbacks": [],
+    "teacher_model": "",
+    "teacher_enabled": False,
+    # Skills: minimum self-reported confidence for an auto-written (LLM-authored)
+    # DRAFT skill to be injected into the agent prompt. Published skills always
+    # qualify. Keeps low-confidence auto-skills out of context until they're
+    # vetted/published. 0 disables the gate.
+    "skill_autosave_min_confidence": 0.85,
+    # Max relevant skills injected into the prompt for one request. The skills
+    # library can grow beyond this; cleanup/retirement is an explicit review flow.
+    "skill_max_injected": 3,
+    # Reminders
+    "reminder_channel": "browser",   # "browser" | "email" | "ntfy"
+    "reminder_llm_synthesis": False,
+    "reminder_ntfy_topic": "Reminders",
+    "reminder_email_to": "",
+    # Email triage scanner rules. Running/paused state and schedule live in
+    # Tasks via the built-in `check_email_urgency` task.
+    "urgent_email_prompt": (
+        "Flag as urgent: explicit deadlines, time-sensitive requests, "
+        "work-blocking issues, messages from people I report to, or anything "
+        "where a delayed reply costs money/trust. Someone waiting outside, "
+        "at the door, locked out, or unable to get in is urgent now. "
+        "Newsletters, marketing, automated digests, and FYI-only updates are "
+        "NOT urgent."
+    ),
+    # Keyboard shortcuts (action: key combination)
+    "keybinds": {
+        "search": "ctrl+k",
+        "toggle_sidebar": "ctrl+b",
+        "new_session": "ctrl+alt+n",
+        "star_session": "ctrl+alt+s",
+        "delete_session": "ctrl+alt+d",
+        "admin_panel": "ctrl+shift+u",
+        "cancel": "escape",
+    },
+}
+
+DEFAULT_FEATURES = {
+    "web_search": True,
+    "web_fetch": True,
+    "deep_research": False,
+    "memory": True,
+    "document_editor": True,
+    "rag": True,
+    "sensitive_filter": True,
+    "gallery": True,
+}
+
+
+# ── Settings (data/settings.json) ──
+
+def load_settings() -> dict:
+    """Load settings merged with defaults. Always returns a complete dict."""
+    global _settings_cache
+    now = time.monotonic()
+    if _settings_cache and (now - _settings_cache[0]) < _CACHE_TTL:
+        return _settings_cache[1]
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        merged = {**DEFAULT_SETTINGS, **saved}
+    except (FileNotFoundError, json.JSONDecodeError):
+        merged = dict(DEFAULT_SETTINGS)
+    _settings_cache = (now, merged)
+    return merged
+
+
+def save_settings(settings: dict):
+    """Persist settings to disk (atomic; see core.atomic_io)."""
+    from core.atomic_io import atomic_write_json
+    atomic_write_json(SETTINGS_FILE, settings, indent=2)
+    _invalidate_caches()
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    """Read a single setting value."""
+    return load_settings().get(key, default)
+
+
+# Per-user settings (user prefs override the global admin default). Used for
+# keys that a user is allowed to choose individually — currently the vision
+# model + image-generation model. The owner argument is the authed username
+# resolved by FastAPI deps; an empty/None owner falls through to the global.
+_PER_USER_KEYS = {
+    "vision_model", "vision_enabled", "vision_model_fallbacks",
+    "image_model", "image_gen_enabled", "image_quality",
+    # Default chat endpoint / model — without per-user resolution every new
+    # account inherited whatever the most-recent admin picked, which then
+    # got injected into the chat composer on first open.
+    "default_endpoint_id", "default_model", "default_model_fallbacks",
+    "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
+    "research_endpoint_id", "research_model",
+}
+
+
+def get_user_setting(key: str, owner: str = "", default: Any = None) -> Any:
+    """Resolve `key` from the caller's per-user prefs first, falling back to
+    the global setting. Only the small whitelist in `_PER_USER_KEYS` is
+    eligible — for any other key this is equivalent to `get_setting(key)`.
+
+    Falls back gracefully if the prefs module can't be imported (cycle/early
+    boot) — admin-global settings keep working.
+    """
+    if owner and key in _PER_USER_KEYS:
+        try:
+            from routes.prefs_routes import _load_for_user
+            prefs = _load_for_user(owner) or {}
+            if key in prefs and prefs[key] not in (None, ""):
+                return prefs[key]
+        except Exception:
+            pass
+    return get_setting(key, default)
+
+
+# ── Features (data/features.json) ──
+
+def load_features() -> dict:
+    """Load feature flags merged with defaults."""
+    global _features_cache
+    now = time.monotonic()
+    if _features_cache and (now - _features_cache[0]) < _CACHE_TTL:
+        return _features_cache[1]
+    try:
+        with open(FEATURES_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        merged = {**DEFAULT_FEATURES, **saved}
+    except (FileNotFoundError, json.JSONDecodeError):
+        merged = dict(DEFAULT_FEATURES)
+    _features_cache = (now, merged)
+    return merged
+
+
+def save_features(features: dict):
+    """Persist feature flags to disk (atomic)."""
+    from core.atomic_io import atomic_write_json
+    atomic_write_json(FEATURES_FILE, features, indent=2)
+    _invalidate_caches()
