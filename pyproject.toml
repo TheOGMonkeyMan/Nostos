@@ -1,3 +1,20 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# Minimal, intentionally lenient config for the Phase 0.1 non-blocking lint /
+# type lanes. These are reports today; later tasks ratchet them toward gates.
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+  "static",            # vendored/minified JS + build artifacts (not Python)
+  "scripts/_completion",
+]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true   # gradual: don't drown in third-party stub gaps
+follow_imports = "silent"
+warn_unused_ignores = false
+exclude = "(^|/)(tests|scripts)/"

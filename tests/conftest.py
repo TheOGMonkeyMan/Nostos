@@ -5,7 +5,17 @@ import types
 import importlib.util
 from unittest.mock import MagicMock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
+
+# core.database builds its SQLite engine at import time from DATABASE_URL
+# (default sqlite:///./data/app.db). On a clean checkout the gitignored ./data
+# dir does not exist, so importing core.database during collection fails with
+# "unable to open database file". Create it up front (relative to both the CWD
+# the engine resolves against and the project root) so the suite is
+# self-sufficient on any fresh checkout — CI runners included.
+for _data_dir in {os.path.join(os.getcwd(), "data"), os.path.join(_PROJECT_ROOT, "data")}:
+    os.makedirs(_data_dir, exist_ok=True)
 
 def _has_module(mod_name: str) -> bool:
     try:
