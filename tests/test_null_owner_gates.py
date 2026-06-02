@@ -24,11 +24,32 @@ from unittest.mock import MagicMock
 # the conftest's `sqlalchemy.*` MagicMock stubs ("metaclass conflict").
 # Stub also a handful of route modules each of these targeted modules
 # happens to drag in at import-time.
-for _stub in [
+import importlib.util as _ilu
+
+
+def _module_is_real(_name):
+    """True when the named module can genuinely import — i.e. it is NOT one of
+    the conftest's MagicMock stubs (which only exist when the heavy dep is
+    absent). Used to decide whether we must install our own stand-in stubs."""
+    if isinstance(sys.modules.get(_name), MagicMock):
+        return False
+    try:
+        return _ilu.find_spec(_name) is not None
+    except Exception:
+        return False
+
+
+# Only install stand-in stubs when sqlalchemy is absent/mocked. When it is
+# installed (e.g. the CI matrix), the real core.database imports cleanly, and
+# stubbing it here would leak an incomplete module into sys.modules for every
+# later test that needs the real one — the cross-test isolation bug that made
+# test_task_scheduler_session_delivery fail only in the full suite.
+_stubs = [] if _module_is_real("sqlalchemy") else [
     "core.database",
     "core.auth",
     "src.endpoint_resolver",
-]:
+]
+for _stub in _stubs:
     if _stub not in sys.modules:
         m = types.ModuleType(_stub)
         # Provide the names the importers will look up.

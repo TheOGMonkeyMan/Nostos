@@ -13,6 +13,11 @@ if _endpoint_resolver is not None and not getattr(_endpoint_resolver, "__file__"
     sys.modules.pop("src.endpoint_resolver", None)
     sys.modules.pop("routes.model_routes", None)
 
+# Stub core.database ONLY for the duration of importing the pure route helpers,
+# then restore. Leaving an incomplete stub (no `Base`) in sys.modules leaks it
+# to later tests that import the real module (e.g.
+# test_task_scheduler_session_delivery, which needs core.database.Base).
+_stubbed_core_db = False
 if "core.database" not in sys.modules:
     _core_db = types.ModuleType("core.database")
     for _name in [
@@ -23,19 +28,24 @@ if "core.database" not in sys.modules:
     ]:
         setattr(_core_db, _name, MagicMock())
     sys.modules["core.database"] = _core_db
+    _stubbed_core_db = True
 
-import routes.model_routes as model_routes
-import src.endpoint_resolver as endpoint_resolver
-from routes.model_routes import (
-    _match_provider_curated,
-    _curate_models,
-    _is_chat_model,
-    _classify_endpoint,
-    _probe_endpoint,
-    _truthy,
-    _PROVIDER_CURATED,
-)
-from src.llm_core import ANTHROPIC_MODELS
+try:
+    import routes.model_routes as model_routes
+    import src.endpoint_resolver as endpoint_resolver
+    from routes.model_routes import (
+        _match_provider_curated,
+        _curate_models,
+        _is_chat_model,
+        _classify_endpoint,
+        _probe_endpoint,
+        _truthy,
+        _PROVIDER_CURATED,
+    )
+    from src.llm_core import ANTHROPIC_MODELS
+finally:
+    if _stubbed_core_db:
+        sys.modules.pop("core.database", None)
 
 
 # ── _match_provider_curated ──

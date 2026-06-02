@@ -66,21 +66,41 @@ def _ensure_stub(name: str, **attrs):
         setattr(parent, child_name, mod)
     return mod
 
-_ensure_stub("core.database",
-    SessionLocal=MagicMock(), ScheduledTask=MagicMock(), TaskRun=MagicMock(),
-    ModelEndpoint=MagicMock(), Session=MagicMock(), ChatMessage=MagicMock(),
-    CalendarCal=MagicMock(), CalendarEvent=MagicMock(),
-    Document=MagicMock(), DocumentVersion=MagicMock(),
-    GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
-    McpServer=MagicMock(),
-)
-_ensure_stub("core.auth", AuthManager=MagicMock())
-_ensure_stub("src.endpoint_resolver",
-    resolve_endpoint=MagicMock(return_value=("", "", {})),
-    normalize_base=MagicMock(),
-    build_chat_url=MagicMock(),
-    build_headers=MagicMock(),
-)
+import importlib.util as _ilu
+
+
+def _module_is_real(_name):
+    """True when the named module can genuinely import — i.e. it is NOT one of
+    the conftest's MagicMock stubs (which only exist when the heavy dep is
+    absent). Used to decide whether we must install our own stand-in stubs."""
+    if isinstance(sys.modules.get(_name), MagicMock):
+        return False
+    try:
+        return _ilu.find_spec(_name) is not None
+    except Exception:
+        return False
+
+
+# Only install stand-in stubs when sqlalchemy is absent/mocked. When it is
+# installed (e.g. the CI matrix), the real core.database imports cleanly, and
+# stubbing it here would leak an incomplete module into sys.modules for every
+# later test that needs the real one (cross-test isolation leak).
+if not _module_is_real("sqlalchemy"):
+    _ensure_stub("core.database",
+        SessionLocal=MagicMock(), ScheduledTask=MagicMock(), TaskRun=MagicMock(),
+        ModelEndpoint=MagicMock(), Session=MagicMock(), ChatMessage=MagicMock(),
+        CalendarCal=MagicMock(), CalendarEvent=MagicMock(),
+        Document=MagicMock(), DocumentVersion=MagicMock(),
+        GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
+        McpServer=MagicMock(),
+    )
+    _ensure_stub("core.auth", AuthManager=MagicMock())
+    _ensure_stub("src.endpoint_resolver",
+        resolve_endpoint=MagicMock(return_value=("", "", {})),
+        normalize_base=MagicMock(),
+        build_chat_url=MagicMock(),
+        build_headers=MagicMock(),
+    )
 
 from fastapi import HTTPException
 

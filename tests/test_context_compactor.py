@@ -4,22 +4,33 @@ Uses mock imports to avoid loading the full app stack."""
 import sys
 from unittest.mock import MagicMock
 
-# Mock heavy dependencies before importing
-for mod in [
+# Mock heavy dependencies ONLY for the duration of importing the pure helpers
+# below, then restore sys.modules. Leaving these stubs in place leaks a mocked
+# sqlalchemy/sqlalchemy.orm into the whole session and breaks later tests that
+# need the real ORM (e.g. test_task_scheduler_session_delivery). The symbols we
+# import are constants/pure functions, so they keep working after restore.
+_HEAVY_MODS = [
     'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
     'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
     'src.database',
     'core.models', 'core.database',
-]:
+]
+_stubbed_mods = []
+for mod in _HEAVY_MODS:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
+        _stubbed_mods.append(mod)
 
-from src.context_compactor import (
-    COMPACT_THRESHOLD,
-    SELF_SUMMARY_SYSTEM_PROMPT,
-    SUMMARY_MAX_TOKENS,
-    trim_for_context,
-)
+try:
+    from src.context_compactor import (
+        COMPACT_THRESHOLD,
+        SELF_SUMMARY_SYSTEM_PROMPT,
+        SUMMARY_MAX_TOKENS,
+        trim_for_context,
+    )
+finally:
+    for mod in _stubbed_mods:
+        sys.modules.pop(mod, None)
 
 
 class TestCompactThreshold:
