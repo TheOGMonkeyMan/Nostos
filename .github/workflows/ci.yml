@@ -50,7 +50,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           # DEFERRED(10.6): pin ruff/mypy versions + action digests (supply-chain task).
-          pip install ruff mypy
+          pip install ruff mypy pytest-cov
 
       - name: Ruff lint (non-blocking)
         continue-on-error: true
@@ -64,5 +64,19 @@ jobs:
         continue-on-error: true
         run: mypy app.py src core services routes mcp_servers
 
-      - name: Pytest (gate)
-        run: pytest -q
+      # Gate: tests must pass. Coverage is collected here but NON-gating (no
+      # --cov-fail-under), establishing a baseline to ratchet later (0.6 / §12).
+      # Baseline at adoption: ~11% over src/core/services/routes/mcp_servers.
+      - name: Pytest (gate) + coverage
+        run: >-
+          pytest -q
+          --cov=src --cov=core --cov=services --cov=routes --cov=mcp_servers
+          --cov-report=xml --cov-report=term
+
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
