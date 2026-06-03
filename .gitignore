@@ -50,6 +50,12 @@ Thumbs.db
 cache/
 output.txt.txt
 
+# Coverage (Phase 0.6)
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+
 # Media (uploaded/generated)
 *.jpg
 *.jpeg
