@@ -1,0 +1,68 @@
+name: Docker smoke
+
+# Builds the full compose stack and proves it comes up healthy - the "doesn't
+# start on my machine" gate. Runs on PRs to main and nightly only (not every
+# push): a full image build + pulls is minutes long, so it is deliberately not
+# on the per-push path.
+#
+# Verified locally (2026-06-03) on Docker 29.5 / Compose v5: build -> up -d ->
+# /healthz 200 {"status":"ok"} -> down -v, all clean.
+#
+# DEFERRED: the plan also calls for probing the chat path against a *mocked*
+# provider. That needs a mock LLM injected and is materially more involved; this
+# workflow lands the high-value build + come-up-healthy smoke first.
+#
+# Rollback: delete this file.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *"   # nightly (07:00 UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: docker compose up -> /healthz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # compose has `env_file: .env`; a fresh checkout only ships .env.example.
+      - name: Prepare .env
+        run: cp .env.example .env
+
+      - name: Build and start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for /healthz to report healthy
+        run: |
+          set -u
+          for i in $(seq 1 48); do
+            code=$(curl -s -o /tmp/healthz.json -w "%{http_code}" http://localhost:7000/healthz || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy after ${i} attempt(s):"
+              cat /tmp/healthz.json; echo
+              exit 0
+            fi
+            echo "attempt ${i}: HTTP '${code}' - waiting..."
+            sleep 5
+          done
+          echo "::error::/healthz did not return 200 within ~4 minutes"
+          exit 1
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
