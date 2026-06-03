@@ -1,0 +1,73 @@
+name: Bug report
+description: Something isn't working. Include enough for a stranger to reproduce it.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Odysseus runs on other people's
+        machines, so the OS / GPU / install-method fields below matter a lot - most
+        bugs are environment-specific. Please fill them in.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what actually happened?
+      placeholder: I clicked X and expected Y, but got Z.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, numbered steps. A failing example beats a description.
+      placeholder: |
+        1. Start with `...`
+        2. Open `...`
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows
+        - GrapheneOS / Android
+        - Other (note in description)
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU / accelerator
+      description: Model + driver if relevant (e.g. "NVIDIA RTX 4070, CUDA 12.4", "Apple M4", "CPU only").
+      placeholder: CPU only
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - Docker / docker compose
+        - Native (venv + uvicorn)
+        - macOS app build
+        - Other (note in description)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: From /api/version, or the git commit you're on.
+      placeholder: e.g. 1.0.0 or 5ed9b74
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any error output or logs. Redact secrets - never paste API keys or tokens.
+      render: shell

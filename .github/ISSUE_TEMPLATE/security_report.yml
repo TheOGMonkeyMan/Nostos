@@ -1,0 +1,32 @@
+name: Security report
+description: Read this before reporting a security issue.
+labels: ["security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Do NOT report vulnerabilities in a public issue
+
+        Public issues are world-readable. Disclosing a vulnerability here puts every
+        user at risk before a fix exists.
+
+        **Report privately instead:** open a draft advisory at
+        https://github.com/TheOGMonkeyMan/Nostos/security/advisories/new
+        (or see `SECURITY.md`).
+
+        Only continue filing this public issue if your report contains **no exploit
+        detail** - e.g. a hardening suggestion or a question about the threat model.
+  - type: checkboxes
+    id: ack
+    attributes:
+      label: Confirmation
+      options:
+        - label: This report contains NO exploitable detail; sensitive findings go to the private advisory above.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Non-sensitive summary
+      description: Hardening idea or threat-model question only. Never paste secrets, tokens, or working exploits.
+    validations:
+      required: true
