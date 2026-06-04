@@ -10,6 +10,7 @@ BubblewrapSandbox and only run meaningfully on the Linux CI lane.
 """
 
 import dataclasses
+import os
 import shutil
 import sys
 
@@ -19,6 +20,7 @@ from src.sandbox import (
     BubblewrapSandbox,
     Mount,
     NoSandbox,
+    PathJailSubprocess,
     Sandbox,
     SandboxLimits,
     SandboxResult,
@@ -142,20 +144,23 @@ def test_factory_none_returns_nosandbox():
     assert isinstance(get_sandbox("none"), NoSandbox)
 
 
-def test_factory_pathjail_not_implemented_yet():
-    # pathjail is not registered yet -> default-deny.
-    with pytest.raises(SandboxUnavailable):
-        get_sandbox("pathjail")
+def test_factory_pathjail_returns_pathjail():
+    # pathjail is the weak fallback, available on every platform.
+    assert isinstance(get_sandbox("pathjail"), PathJailSubprocess)
 
 
-def test_factory_auto_resolves_or_default_denies():
+def test_factory_auto_resolves_per_os():
     if _BWRAP:
-        # Linux + bwrap: auto -> bubblewrap, which is available.
+        # Linux + bwrap: auto -> bubblewrap.
         assert isinstance(get_sandbox("auto"), BubblewrapSandbox)
-    else:
-        # No isolating backend available here -> refuse, never run unsandboxed.
+    elif sys.platform.startswith("linux"):
+        # Linux without bwrap: the per-OS backend is unavailable -> fail closed,
+        # never silently run unsandboxed.
         with pytest.raises(SandboxUnavailable):
             get_sandbox("auto")
+    else:
+        # mac / windows: auto -> pathjail (the weak fallback).
+        assert isinstance(get_sandbox("auto"), PathJailSubprocess)
 
 
 def test_factory_bubblewrap_availability_is_host_gated():
@@ -259,3 +264,65 @@ async def test_bwrap_truncates_output(tmp_path):
     )
     assert res.truncated is True
     assert len(res.stdout) <= 10
+
+
+# --- PathJailSubprocess (weak Mac/Windows fallback; runs cross-OS) ----------
+#
+# pathjail is NOT a strong fs/network boundary (it can use the host python), so
+# these pin the guarantees it DOES make: it runs, honors timeout/truncation,
+# scrubs the environment, and starts in the workspace cwd.
+
+
+async def test_pathjail_runs_command(tmp_path):
+    sb = PathJailSubprocess()
+    res = await sb.run(
+        [sys.executable, "-c", "print('pj-ok')"], cwd=str(tmp_path), limits=SandboxLimits()
+    )
+    assert res.exit_code == 0
+    assert "pj-ok" in res.stdout
+
+
+async def test_pathjail_honors_timeout(tmp_path):
+    sb = PathJailSubprocess()
+    res = await sb.run(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        cwd=str(tmp_path),
+        limits=SandboxLimits(timeout_s=1),
+    )
+    assert res.timed_out is True
+
+
+async def test_pathjail_truncates_output(tmp_path):
+    sb = PathJailSubprocess()
+    res = await sb.run(
+        [sys.executable, "-c", "print('x' * 100)"],
+        cwd=str(tmp_path),
+        limits=SandboxLimits(max_output_bytes=10),
+    )
+    assert res.truncated is True
+    assert len(res.stdout) <= 10
+
+
+async def test_pathjail_scrubs_environment(tmp_path, monkeypatch):
+    # A secret in the parent environment must NOT leak into the command.
+    monkeypatch.setenv("PATHJAIL_LEAK_TEST", "super-secret")
+    sb = PathJailSubprocess()
+    res = await sb.run(
+        [sys.executable, "-c", "import os; print(os.environ.get('PATHJAIL_LEAK_TEST', 'ABSENT'))"],
+        cwd=str(tmp_path),
+        limits=SandboxLimits(),
+    )
+    assert res.exit_code == 0
+    assert "super-secret" not in res.stdout
+    assert "ABSENT" in res.stdout
+
+
+async def test_pathjail_starts_in_workspace(tmp_path):
+    sb = PathJailSubprocess()
+    res = await sb.run(
+        [sys.executable, "-c", "import os; print(os.path.realpath(os.getcwd()))"],
+        cwd=str(tmp_path),
+        limits=SandboxLimits(),
+    )
+    assert res.exit_code == 0
+    assert os.path.realpath(res.stdout.strip()) == os.path.realpath(str(tmp_path))

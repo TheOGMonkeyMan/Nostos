@@ -8,6 +8,7 @@ from .base import Mount, Sandbox, SandboxLimits, SandboxResult
 from .bubblewrap import BubblewrapSandbox
 from .factory import SandboxUnavailable, get_sandbox, resolve_backend_name
 from .nosandbox import NoSandbox
+from .pathjail import PathJailSubprocess
 from .workspace import clean_workspace, ensure_workspace, workspace_path
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "Sandbox",
     "NoSandbox",
     "BubblewrapSandbox",
+    "PathJailSubprocess",
     "get_sandbox",
     "resolve_backend_name",
     "SandboxUnavailable",

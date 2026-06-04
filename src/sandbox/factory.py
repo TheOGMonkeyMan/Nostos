@@ -18,6 +18,7 @@ from typing import Callable, Dict
 from .base import Sandbox
 from .bubblewrap import BubblewrapSandbox
 from .nosandbox import NoSandbox
+from .pathjail import PathJailSubprocess
 
 
 class SandboxUnavailable(RuntimeError):
@@ -31,6 +32,7 @@ class SandboxUnavailable(RuntimeError):
 _BACKENDS: Dict[str, Callable[[], Sandbox]] = {
     "none": NoSandbox,
     "bubblewrap": BubblewrapSandbox,
+    "pathjail": PathJailSubprocess,
 }
 
 
