@@ -52,6 +52,20 @@ jobs:
           # DEFERRED(10.6): pin ruff/mypy versions + action digests (supply-chain task).
           pip install ruff mypy pytest-cov
 
+      # bubblewrap powers the Linux sandbox isolation tests (tests/test_sandbox.py).
+      # Without it those tests SKIP; installing it makes the ubuntu lane actually
+      # exercise the escape/network/timeout guarantees. (iproute2 is preinstalled.)
+      - name: Install bubblewrap (Linux sandbox tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # ubuntu 24.04 restricts unprivileged user namespaces via AppArmor, which
+          # bwrap needs to set up its net namespace (else it dies with
+          # "loopback: Failed RTM_NEWADDR: Operation not permitted"). Relax it for
+          # the test environment. On a real host, bwrap is typically setuid or the
+          # distro permits unprivileged userns (see src/sandbox/bubblewrap.py).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Ruff lint (non-blocking)
         continue-on-error: true
         run: ruff check .
