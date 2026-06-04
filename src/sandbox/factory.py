@@ -16,6 +16,7 @@ import sys
 from typing import Callable, Dict
 
 from .base import Sandbox
+from .bubblewrap import BubblewrapSandbox
 from .nosandbox import NoSandbox
 
 
@@ -24,10 +25,12 @@ class SandboxUnavailable(RuntimeError):
     caller must fail closed - never degrade to unsandboxed execution."""
 
 
-# Registry of implemented backends. NoSandbox is intentionally the only entry
-# until the isolating backends land; auto never points here.
+# Registry of implemented backends. A backend may expose a static is_available()
+# (e.g. bubblewrap needs Linux + the bwrap binary); if it reports unavailable on
+# this host, get_sandbox fails closed rather than constructing it.
 _BACKENDS: Dict[str, Callable[[], Sandbox]] = {
     "none": NoSandbox,
+    "bubblewrap": BubblewrapSandbox,
 }
 
 
@@ -54,8 +57,14 @@ def get_sandbox(backend: str | None = None) -> Sandbox:
     factory = _BACKENDS.get(name)
     if factory is None:
         raise SandboxUnavailable(
-            f"sandbox backend '{name}' is not available "
+            f"sandbox backend '{name}' is not implemented "
             f"(implemented: {sorted(_BACKENDS)}). "
             f"Set SANDBOX_BACKEND=none for dev-only direct-host execution."
+        )
+    is_available = getattr(factory, "is_available", None)
+    if is_available is not None and not is_available():
+        raise SandboxUnavailable(
+            f"sandbox backend '{name}' is implemented but not available on this "
+            f"host (e.g. bubblewrap requires Linux + the 'bwrap' binary)."
         )
     return factory()

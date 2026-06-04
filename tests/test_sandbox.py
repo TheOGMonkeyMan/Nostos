@@ -10,11 +10,13 @@ BubblewrapSandbox and only run meaningfully on the Linux CI lane.
 """
 
 import dataclasses
+import shutil
 import sys
 
 import pytest
 
 from src.sandbox import (
+    BubblewrapSandbox,
     Mount,
     NoSandbox,
     Sandbox,
@@ -27,6 +29,11 @@ from src.sandbox import (
     resolve_backend_name,
     workspace_path,
 )
+
+# bubblewrap isolation is verifiable only on Linux with the bwrap binary; on
+# this Windows dev box these tests SKIP and only run on the ubuntu CI lane.
+_BWRAP = sys.platform.startswith("linux") and shutil.which("bwrap") is not None
+_requires_bwrap = pytest.mark.skipif(not _BWRAP, reason="requires Linux + bwrap")
 
 
 def test_limits_defaults_match_contract():
@@ -135,16 +142,29 @@ def test_factory_none_returns_nosandbox():
     assert isinstance(get_sandbox("none"), NoSandbox)
 
 
-def test_factory_auto_is_default_deny_until_backends_land():
-    # Only NoSandbox is implemented; auto resolves to a per-OS backend that
-    # is not registered yet, so it must REFUSE, never fall back to no-isolation.
+def test_factory_pathjail_not_implemented_yet():
+    # pathjail is not registered yet -> default-deny.
     with pytest.raises(SandboxUnavailable):
-        get_sandbox("auto")
+        get_sandbox("pathjail")
 
 
-def test_factory_unimplemented_backend_raises():
-    with pytest.raises(SandboxUnavailable):
-        get_sandbox("bubblewrap")
+def test_factory_auto_resolves_or_default_denies():
+    if _BWRAP:
+        # Linux + bwrap: auto -> bubblewrap, which is available.
+        assert isinstance(get_sandbox("auto"), BubblewrapSandbox)
+    else:
+        # No isolating backend available here -> refuse, never run unsandboxed.
+        with pytest.raises(SandboxUnavailable):
+            get_sandbox("auto")
+
+
+def test_factory_bubblewrap_availability_is_host_gated():
+    if _BWRAP:
+        assert isinstance(get_sandbox("bubblewrap"), BubblewrapSandbox)
+    else:
+        # Registered but unavailable on this host -> fail closed.
+        with pytest.raises(SandboxUnavailable):
+            get_sandbox("bubblewrap")
 
 
 def test_resolve_backend_name_auto_maps_per_os():
@@ -176,3 +196,66 @@ def test_workspace_sanitizes_traversal():
     assert ".." not in parts
     # the leaf is a single sanitized segment
     assert "/" not in p.name and "\\" not in p.name
+
+
+# --- BubblewrapSandbox isolation (Linux CI lane only; SKIPS elsewhere) ------
+#
+# These prove the security guarantees and use only shell/coreutils/iproute2,
+# which live under the bound /usr - NOT the host's setup-python interpreter
+# (which is outside the sandbox's bind mounts).
+
+
+@_requires_bwrap
+async def test_bwrap_workspace_write_allowed(tmp_path):
+    sb = BubblewrapSandbox()
+    res = await sb.run(
+        "echo hi > out.txt && cat out.txt", cwd=str(tmp_path), limits=SandboxLimits()
+    )
+    assert res.exit_code == 0
+    assert "hi" in res.stdout
+
+
+@_requires_bwrap
+async def test_bwrap_write_outside_workspace_denied(tmp_path):
+    sb = BubblewrapSandbox()
+    res = await sb.run("echo x > /etc/sbx_should_fail", cwd=str(tmp_path), limits=SandboxLimits())
+    assert res.exit_code != 0  # host /etc is read-only inside the sandbox
+
+
+@_requires_bwrap
+async def test_bwrap_network_denied_by_default(tmp_path):
+    sb = BubblewrapSandbox()
+    # Fresh, unshared net namespace has no routes -> no egress possible.
+    res = await sb.run("ip route show default", cwd=str(tmp_path), limits=SandboxLimits())
+    assert res.exit_code == 0
+    assert res.stdout.strip() == ""
+
+
+@_requires_bwrap
+async def test_bwrap_network_visible_when_granted(tmp_path):
+    sb = BubblewrapSandbox()
+    res = await sb.run(
+        "ip route show default",
+        cwd=str(tmp_path),
+        limits=SandboxLimits(),
+        network=True,
+    )
+    assert res.exit_code == 0
+    assert "default" in res.stdout  # host default route is visible when granted
+
+
+@_requires_bwrap
+async def test_bwrap_timeout(tmp_path):
+    sb = BubblewrapSandbox()
+    res = await sb.run("sleep 5", cwd=str(tmp_path), limits=SandboxLimits(timeout_s=1))
+    assert res.timed_out is True
+
+
+@_requires_bwrap
+async def test_bwrap_truncates_output(tmp_path):
+    sb = BubblewrapSandbox()
+    res = await sb.run(
+        "echo xxxxxxxxxxxxxxxxxxxx", cwd=str(tmp_path), limits=SandboxLimits(max_output_bytes=10)
+    )
+    assert res.truncated is True
+    assert len(res.stdout) <= 10
