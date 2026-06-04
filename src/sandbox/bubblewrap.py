@@ -15,6 +15,12 @@ Scope of this version (see DECISIONS.md ADR-013):
   cgroup-capable path (DockerSandbox / cgroup-v2). `--unshare-pid` still gives a
   private pid namespace; it just is not a hard count cap.
 
+Requires unprivileged user namespaces (bwrap creates a user namespace to gain
+caps over the namespaces it makes). Most distros ship this enabled or provide a
+setuid `bwrap`; ubuntu 24.04 restricts it via AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns`), which must be relaxed or a
+profile installed for an unprivileged bwrap to set up its net namespace.
+
 Never raises into the agent loop: failures come back as a SandboxResult.
 """
 
