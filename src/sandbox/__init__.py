@@ -6,6 +6,7 @@ that selects one per SANDBOX_BACKEND will be re-exported here as they land.
 
 from .base import Mount, Sandbox, SandboxLimits, SandboxResult
 from .bubblewrap import BubblewrapSandbox
+from .config import network_granted, parse_mounts, trusted_grants
 from .factory import SandboxUnavailable, get_sandbox, resolve_backend_name
 from .nosandbox import NoSandbox
 from .pathjail import PathJailSubprocess
@@ -25,4 +26,7 @@ __all__ = [
     "ensure_workspace",
     "clean_workspace",
     "workspace_path",
+    "trusted_grants",
+    "parse_mounts",
+    "network_granted",
 ]

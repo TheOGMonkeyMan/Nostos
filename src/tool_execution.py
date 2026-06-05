@@ -332,6 +332,7 @@ async def _run_sandboxed(
         SandboxUnavailable,
         ensure_workspace,
         get_sandbox,
+        trusted_grants,
     )
 
     try:
@@ -341,7 +342,9 @@ async def _run_sandboxed(
 
     workspace = ensure_workspace(session_id or "agent")
     limits = SandboxLimits(timeout_s=timeout, max_output_bytes=MAX_OUTPUT_CHARS)
-    res = await sandbox.run(cmd, cwd=workspace, limits=limits)
+    # Trusted-mode grants (explicit, opt-in): extra mounts + network (1.1d).
+    mounts, network = trusted_grants()
+    res = await sandbox.run(cmd, cwd=workspace, limits=limits, network=network, mounts=mounts)
     if res.timed_out:
         return {
             "error": f"timed out after {timeout}s - process killed",

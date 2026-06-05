@@ -28,7 +28,10 @@ from src.sandbox import (
     clean_workspace,
     ensure_workspace,
     get_sandbox,
+    network_granted,
+    parse_mounts,
     resolve_backend_name,
+    trusted_grants,
     workspace_path,
 )
 
@@ -326,3 +329,60 @@ async def test_pathjail_starts_in_workspace(tmp_path):
     )
     assert res.exit_code == 0
     assert os.path.realpath(res.stdout.strip()) == os.path.realpath(str(tmp_path))
+
+
+# --- Trusted-mode grants (Phase 1.1d): parser is cross-OS ------------------
+
+
+def test_parse_mounts_defaults_ro_and_handles_rw():
+    mounts = parse_mounts("/host/in:/in,/host/out:/out:rw, /h/x:/x:ro ")
+    assert [(m.source, m.target, m.read_only) for m in mounts] == [
+        ("/host/in", "/in", True),
+        ("/host/out", "/out", False),
+        ("/h/x", "/x", True),
+    ]
+
+
+def test_parse_mounts_skips_malformed_and_empty():
+    assert parse_mounts(None) == []
+    assert parse_mounts("") == []
+    assert parse_mounts("garbage,/only-one,:no-source") == []
+
+
+def test_network_granted_truthiness():
+    assert network_granted("1") is True
+    assert network_granted("TRUE") is True
+    assert network_granted("yes") is True
+    assert network_granted("0") is False
+    assert network_granted(None) is False
+    assert network_granted("nope") is False
+
+
+def test_trusted_grants_reads_env(monkeypatch):
+    monkeypatch.setenv("SANDBOX_MOUNTS", "/a:/a:rw")
+    monkeypatch.setenv("SANDBOX_ALLOW_NETWORK", "on")
+    mounts, network = trusted_grants()
+    assert network is True
+    assert len(mounts) == 1 and mounts[0].read_only is False
+    monkeypatch.delenv("SANDBOX_MOUNTS", raising=False)
+    monkeypatch.delenv("SANDBOX_ALLOW_NETWORK", raising=False)
+    assert trusted_grants() == ([], False)
+
+
+@_requires_bwrap
+async def test_bwrap_granted_rw_mount_allows_write_outside_workspace(tmp_path):
+    # Without a mount, writing outside the workspace is denied (proven above).
+    # An explicit rw Mount opens exactly that path - trusted mode.
+    host_dir = tmp_path / "granted"
+    host_dir.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()  # cwd must exist on the host (bwrap binds it)
+    sb = BubblewrapSandbox()
+    res = await sb.run(
+        "echo trusted > /granted/out.txt",
+        cwd=str(workspace),
+        limits=SandboxLimits(),
+        mounts=[Mount(source=str(host_dir), target="/granted", read_only=False)],
+    )
+    assert res.exit_code == 0, res.stderr
+    assert (host_dir / "out.txt").read_text().strip() == "trusted"
