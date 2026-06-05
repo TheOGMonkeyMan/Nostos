@@ -53,3 +53,33 @@ async def test_opt_in_unavailable_backend_fails_closed(monkeypatch):
     assert res["exit_code"] == 1
     assert "unavailable" in res["error"].lower()
     assert "should-not-run" not in str(res)
+
+
+class _RecordingSandbox:
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, cmd, *, cwd, limits, network=False, mounts=None):
+        from src.sandbox import SandboxResult
+
+        self.calls.append({"cmd": cmd, "cwd": cwd, "network": network, "mounts": mounts})
+        return SandboxResult(stdout="ok", stderr="", exit_code=0)
+
+
+async def test_trusted_grants_reach_sandbox_run(monkeypatch):
+    # Phase 1.1d: SANDBOX_MOUNTS + SANDBOX_ALLOW_NETWORK env flow through
+    # _run_sandboxed into sandbox.run() as Mounts + network=True.
+    import src.sandbox as sbpkg
+
+    rec = _RecordingSandbox()
+    monkeypatch.setattr(sbpkg, "get_sandbox", lambda backend: rec)
+    monkeypatch.setenv("SANDBOX_BACKEND", "none")
+    monkeypatch.setenv("SANDBOX_MOUNTS", "/host/in:/in:ro,/host/out:/out:rw")
+    monkeypatch.setenv("SANDBOX_ALLOW_NETWORK", "1")
+
+    res = await _direct_fallback("bash", "echo hi", session_id="grants")
+    assert res["exit_code"] == 0
+    assert len(rec.calls) == 1
+    call = rec.calls[0]
+    assert call["network"] is True
+    assert [(m.target, m.read_only) for m in call["mounts"]] == [("/in", True), ("/out", False)]
