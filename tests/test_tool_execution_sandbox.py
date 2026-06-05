@@ -1,0 +1,55 @@
+"""Phase 1.1c: opt-in routing of the agent's bash/python tools through the sandbox.
+
+Default (SANDBOX_BACKEND unset) = legacy direct execution, unchanged. When set,
+bash/python run through the configured sandbox in the per-session workspace, and
+fail CLOSED if the requested backend is unavailable on this host.
+"""
+
+import sys
+
+import pytest
+
+from src.tool_execution import _direct_fallback, _sandbox_backend
+
+
+def test_sandbox_backend_gate(monkeypatch):
+    monkeypatch.delenv("SANDBOX_BACKEND", raising=False)
+    assert _sandbox_backend() is None
+    monkeypatch.setenv("SANDBOX_BACKEND", "")
+    assert _sandbox_backend() is None
+    monkeypatch.setenv("SANDBOX_BACKEND", " none ")
+    assert _sandbox_backend() == "none"
+
+
+async def test_bash_unset_runs_direct(monkeypatch):
+    monkeypatch.delenv("SANDBOX_BACKEND", raising=False)
+    res = await _direct_fallback("bash", "echo hi", session_id="t")
+    assert res["exit_code"] == 0
+    assert "hi" in res["output"]
+
+
+async def test_python_routes_through_sandbox_into_workspace(monkeypatch):
+    monkeypatch.setenv("SANDBOX_BACKEND", "none")
+    res = await _direct_fallback(
+        "python",
+        "import os; print(os.path.basename(os.getcwd()))",
+        session_id="sbx-route-test",
+    )
+    assert res["exit_code"] == 0
+    # NoSandbox ran the command in the per-session workspace dir.
+    assert "sbx-route-test" in res["output"]
+    from src.sandbox import clean_workspace
+
+    clean_workspace("sbx-route-test")
+
+
+async def test_opt_in_unavailable_backend_fails_closed(monkeypatch):
+    # Opting into a backend not available on this host must NOT silently run
+    # unsandboxed - it returns an error and the command never runs.
+    if sys.platform.startswith("linux"):
+        pytest.skip("bubblewrap may actually be available on Linux")
+    monkeypatch.setenv("SANDBOX_BACKEND", "bubblewrap")
+    res = await _direct_fallback("bash", "echo should-not-run", session_id="t")
+    assert res["exit_code"] == 1
+    assert "unavailable" in res["error"].lower()
+    assert "should-not-run" not in str(res)

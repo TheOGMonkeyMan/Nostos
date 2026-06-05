@@ -31,7 +31,7 @@ MAX_READ_CHARS = 20_000
 # The user can cancel sooner via the chat stop button — when the
 # SSE stream is torn down, the asyncio task running the subprocess
 # gets cancelled and the subprocess is killed by the finally block.
-DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
+DEFAULT_BASH_TIMEOUT = 60 * 60  # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
 
 # How often to push a progress event while a long-running subprocess
@@ -46,6 +46,7 @@ PROGRESS_TAIL_LINES = 12
 
 def get_mcp_manager():
     from src import agent_tools
+
     return agent_tools.get_mcp_manager()
 
 
@@ -53,6 +54,7 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(text) > limit:
         return text[:limit] + f"\n... (truncated, {len(text)} chars total)"
     return text
+
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +103,12 @@ async def _run_subprocess_streaming(
         while True:
             if progress_cb:
                 try:
-                    await progress_cb({
-                        "elapsed_s": round(time.time() - started, 1),
-                        "tail": "\n".join(list(tail)),
-                    })
+                    await progress_cb(
+                        {
+                            "elapsed_s": round(time.time() - started, 1),
+                            "tail": "\n".join(list(tail)),
+                        }
+                    )
                 except Exception:
                     # Progress is best-effort — never let a UI hiccup
                     # break the underlying subprocess.
@@ -167,6 +171,7 @@ async def _run_subprocess_streaming(
         timed_out,
     )
 
+
 _ADMIN_TOOLS = {
     "manage_endpoints",
     "manage_mcp",
@@ -184,19 +189,20 @@ def _owner_is_admin(owner: Optional[str]) -> bool:
     """Mirror route-level admin behavior for agent tool execution."""
     return owner_is_admin_or_single_user(owner)
 
+
 # ---------------------------------------------------------------------------
 # MCP-backed tool helpers
 # ---------------------------------------------------------------------------
 
 # Map legacy tool names -> (MCP server_id, MCP tool_name)
 _MCP_TOOL_MAP = {
-    "bash":           ("bash",       "bash"),
-    "python":         ("python",     "python"),
-    "read_file":      ("filesystem", "read_file"),
-    "write_file":     ("filesystem", "write_file"),
-    "web_search":     ("web_search", "web_search"),
-    "web_fetch":      ("web_fetch",  "web_fetch"),
-    "generate_image": ("image_gen",  "generate_image"),
+    "bash": ("bash", "bash"),
+    "python": ("python", "python"),
+    "read_file": ("filesystem", "read_file"),
+    "write_file": ("filesystem", "write_file"),
+    "web_search": ("web_search", "web_search"),
+    "web_fetch": ("web_fetch", "web_fetch"),
+    "generate_image": ("image_gen", "generate_image"),
 }
 
 
@@ -236,14 +242,14 @@ def _parse_write_file(content: str) -> Dict:
 
 
 _MCP_ARG_PARSERS: Dict[str, callable] = {
-    "bash":           lambda c: {"command": c},
-    "python":         lambda c: {"code": c},
-    "web_search":     lambda c: {"query": c.split("\n")[0].strip()},
-    "web_fetch":      lambda c: {"url": c.split("\n")[0].strip()},
-    "read_file":      lambda c: {"path": c.split("\n")[0].strip()},
-    "write_file":     _parse_write_file,
+    "bash": lambda c: {"command": c},
+    "python": lambda c: {"code": c},
+    "web_search": lambda c: {"query": c.split("\n")[0].strip()},
+    "web_fetch": lambda c: {"url": c.split("\n")[0].strip()},
+    "read_file": lambda c: {"path": c.split("\n")[0].strip()},
+    "write_file": _parse_write_file,
     "generate_image": _parse_generate_image,
-    "manage_memory":  _parse_manage_memory,
+    "manage_memory": _parse_manage_memory,
 }
 
 
@@ -257,11 +263,14 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    session_id: Optional[str] = None,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
-        return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
+        return await _direct_fallback(
+            tool, content, progress_cb=progress_cb, session_id=session_id
+        ) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
 
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
@@ -269,8 +278,14 @@ async def _call_mcp_tool(
     result = await mcp.call_tool(qualified, args)
 
     # If MCP server not connected, try direct fallback
-    if isinstance(result, dict) and result.get("exit_code") == 1 and "not connected" in result.get("error", ""):
-        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb)
+    if (
+        isinstance(result, dict)
+        and result.get("exit_code") == 1
+        and "not connected" in result.get("error", "")
+    ):
+        fallback = await _direct_fallback(
+            tool, content, progress_cb=progress_cb, session_id=session_id
+        )
         if fallback:
             return fallback
 
@@ -293,10 +308,62 @@ def _split_bg_marker(content: str):
     return False, content
 
 
+def _sandbox_backend() -> Optional[str]:
+    """Opt-in gate (Phase 1.1c). The agent's bash/python run sandboxed ONLY when
+    SANDBOX_BACKEND is explicitly set (auto|bubblewrap|pathjail|docker|none).
+    Unset = legacy direct-host behaviour (zero change). The default flips on after
+    trusted mode (1.1d)."""
+    val = os.getenv("SANDBOX_BACKEND")
+    return val.strip() if val and val.strip() else None
+
+
+async def _run_sandboxed(
+    backend: str,
+    cmd,
+    timeout: int,
+    session_id: Optional[str],
+) -> Dict:
+    """Route a bash/python invocation through the configured sandbox, in the
+    per-session workspace. FAILS CLOSED: if the requested backend is unavailable
+    on this host it returns an error, never degrading to unsandboxed execution.
+    Maps the SandboxResult onto the tool's {output|error, exit_code} shape."""
+    from src.sandbox import (
+        SandboxLimits,
+        SandboxUnavailable,
+        ensure_workspace,
+        get_sandbox,
+    )
+
+    try:
+        sandbox = get_sandbox(backend)
+    except SandboxUnavailable as exc:
+        return {"error": f"sandbox backend '{backend}' unavailable: {exc}", "exit_code": 1}
+
+    workspace = ensure_workspace(session_id or "agent")
+    limits = SandboxLimits(timeout_s=timeout, max_output_bytes=MAX_OUTPUT_CHARS)
+    res = await sandbox.run(cmd, cwd=workspace, limits=limits)
+    if res.timed_out:
+        return {
+            "error": f"timed out after {timeout}s - process killed",
+            "exit_code": 124,
+            "stdout": _truncate(res.stdout, MAX_OUTPUT_CHARS),
+            "stderr": _truncate(res.stderr, MAX_OUTPUT_CHARS),
+        }
+    output = res.stdout.rstrip()
+    err = res.stderr.rstrip()
+    if err:
+        output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+    return {
+        "output": _truncate(output, MAX_OUTPUT_CHARS) or "(no output)",
+        "exit_code": res.exit_code or 0,
+    }
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[Dict]:
     """In-process execution path for the eight tools that used to live as
     stdio MCP servers under mcp_servers/. Those servers were deleted in
@@ -326,6 +393,9 @@ async def _direct_fallback(
 
     try:
         if tool == "bash":
+            _sbx = _sandbox_backend()
+            if _sbx:
+                return await _run_sandboxed(_sbx, content, DEFAULT_BASH_TIMEOUT, session_id)
             proc = await asyncio.create_subprocess_shell(
                 content,
                 stdout=asyncio.subprocess.PIPE,
@@ -338,7 +408,12 @@ async def _direct_fallback(
                 progress_cb=progress_cb,
             )
             if timed_out:
-                return {"error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+                return {
+                    "error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed",
+                    "exit_code": 124,
+                    "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
+                    "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
+                }
             output = stdout.rstrip()
             err = stderr.rstrip()
             if err:
@@ -347,13 +422,25 @@ async def _direct_fallback(
             return {"output": output or "(no output)", "exit_code": rc or 0}
 
         if tool == "python":
+            _sbx = _sandbox_backend()
+            if _sbx:
+                # Inside bubblewrap the host venv interpreter is not on the bound
+                # /usr, so resolve python3 from PATH; other backends keep the
+                # running interpreter.
+                py = "python3" if _sbx == "bubblewrap" else (sys.executable or "python")
+                return await _run_sandboxed(
+                    _sbx, [py, "-I", "-c", content], DEFAULT_PYTHON_TIMEOUT, session_id
+                )
             # Run user code in a subprocess so an infinite loop or crash
             # can't take the whole server down. -I = isolated mode (skip
             # user site, no PYTHONPATH inheritance) for hygiene.
             proc = await asyncio.create_subprocess_exec(
                 # Use the running interpreter — there is no `python3.exe` on
                 # Windows, which made the agent's `python` tool fail there.
-                (sys.executable or "python"), "-I", "-c", content,
+                (sys.executable or "python"),
+                "-I",
+                "-c",
+                content,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_subproc_env,
@@ -364,7 +451,12 @@ async def _direct_fallback(
                 progress_cb=progress_cb,
             )
             if timed_out:
-                return {"error": f"python: timed out after {DEFAULT_PYTHON_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+                return {
+                    "error": f"python: timed out after {DEFAULT_PYTHON_TIMEOUT}s — process killed",
+                    "exit_code": 124,
+                    "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
+                    "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
+                }
             output = stdout.rstrip()
             err = stderr.rstrip()
             if err:
@@ -381,6 +473,7 @@ async def _direct_fallback(
                 def _read():
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
                         return f.read(MAX_READ_CHARS + 1)
+
                 data = await asyncio.to_thread(_read)
             except FileNotFoundError:
                 return {"error": f"read_file: {path}: not found", "exit_code": 1}
@@ -400,14 +493,17 @@ async def _direct_fallback(
             if not path:
                 return {"error": "write_file: path required", "exit_code": 1}
             try:
+
                 def _write():
                     import os
+
                     d = os.path.dirname(path)
                     if d:
                         os.makedirs(d, exist_ok=True)
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(body)
                     return len(body)
+
                 size = await asyncio.to_thread(_write)
             except PermissionError:
                 return {"error": f"write_file: {path}: permission denied", "exit_code": 1}
@@ -417,6 +513,7 @@ async def _direct_fallback(
 
         if tool == "web_search":
             from src.search import comprehensive_web_search
+
             raw = content.strip()
             query = raw
             time_filter = None
@@ -440,9 +537,21 @@ async def _direct_fallback(
             # Auto-detect freshness from query phrasing when not explicit
             if time_filter is None:
                 q_lc = query.lower()
-                if any(kw in q_lc for kw in ("today", "latest", "breaking", "this morning", "right now", "currently")):
+                if any(
+                    kw in q_lc
+                    for kw in (
+                        "today",
+                        "latest",
+                        "breaking",
+                        "this morning",
+                        "right now",
+                        "currently",
+                    )
+                ):
                     time_filter = "day"
-                elif any(kw in q_lc for kw in ("this week", "past week", "recent news", "last few days")):
+                elif any(
+                    kw in q_lc for kw in ("this week", "past week", "recent news", "last few days")
+                ):
                     time_filter = "week"
                 elif any(kw in q_lc for kw in ("this month", "past month")):
                     time_filter = "month"
@@ -471,6 +580,7 @@ async def _direct_fallback(
             # by deep research, so private/loopback/metadata addresses are
             # already blocked there.
             from src.search.content import fetch_webpage_content
+
             raw = content.strip()
             url = ""
             # Accept either a JSON arg ({"url": "..."}) or a plain URL/domain.
@@ -487,10 +597,16 @@ async def _direct_fallback(
                 url = raw.split("\n")[0].strip()
             # Reject anything that isn't a single bare URL/domain token.
             if not url or url.startswith("{") or any(c in url for c in (" ", "\t", "\n")):
-                return {"error": "web_fetch: provide a single URL or domain, e.g. example.com", "exit_code": 1}
+                return {
+                    "error": "web_fetch: provide a single URL or domain, e.g. example.com",
+                    "exit_code": 1,
+                }
             low = url.lower()
             if "://" in low and not low.startswith(("http://", "https://")):
-                return {"error": f"web_fetch: unsupported URL scheme (only http/https): {url[:80]}", "exit_code": 1}
+                return {
+                    "error": f"web_fetch: unsupported URL scheme (only http/https): {url[:80]}",
+                    "exit_code": 1,
+                }
             # Accept bare domains like "example.com" by defaulting to https.
             if not low.startswith(("http://", "https://")):
                 url = "https://" + url
@@ -511,7 +627,10 @@ async def _direct_fallback(
                     return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
                 # No extractable text: non-HTML body, or a pure client-rendered
                 # shell. The agent can fall back to the builtin_browser tool.
-                return {"error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)", "exit_code": 1}
+                return {
+                    "error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)",
+                    "exit_code": 1,
+                }
 
             header = (f"# {title}\n" if title else "") + f"Source: {url}\n\n"
             output = header + text
@@ -532,6 +651,7 @@ async def _direct_fallback(
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+
 async def execute_tool_block(
     block: Any,
     session_id: Optional[str] = None,
@@ -546,19 +666,42 @@ async def execute_tool_block(
     events while the command is in flight. Ignored by other tools.
     """
     from src.tool_implementations import (
-        do_create_document, do_update_document, do_edit_document,
-        do_suggest_document, do_search_chats, do_manage_tasks,
-        do_manage_skills, do_api_call, do_manage_endpoints,
-        do_manage_mcp, do_manage_webhooks, do_manage_tokens,
-        do_manage_documents, do_manage_settings, do_manage_notes,
+        do_create_document,
+        do_update_document,
+        do_edit_document,
+        do_suggest_document,
+        do_search_chats,
+        do_manage_tasks,
+        do_manage_skills,
+        do_api_call,
+        do_manage_endpoints,
+        do_manage_mcp,
+        do_manage_webhooks,
+        do_manage_tokens,
+        do_manage_documents,
+        do_manage_settings,
+        do_manage_notes,
         do_manage_calendar,
-        do_download_model, do_serve_model, do_list_served_models, do_stop_served_model,
-        do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
-        do_list_serve_presets, do_serve_preset, do_adopt_served_model,
+        do_download_model,
+        do_serve_model,
+        do_list_served_models,
+        do_stop_served_model,
+        do_list_downloads,
+        do_cancel_download,
+        do_search_hf_models,
+        do_list_cached_models,
+        do_list_serve_presets,
+        do_serve_preset,
+        do_adopt_served_model,
         do_list_cookbook_servers,
-        do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
+        do_edit_image,
+        do_trigger_research,
+        do_manage_research,
+        do_resolve_contact,
         do_manage_contact,
-        do_vault_search, do_vault_get, do_vault_unlock,
+        do_vault_search,
+        do_vault_get,
+        do_vault_unlock,
         do_app_api,
     )
 
@@ -568,9 +711,14 @@ async def execute_tool_block(
     # Misformatted tool call detection: model put JSON inside ```python``` (or
     # similar) without naming the tool. Common with MiniMax-style outputs.
     # Return a helpful error so the model retries with the correct format.
-    if tool in ("python", "json", "xml") and content.strip().startswith("{") and content.strip().endswith("}"):
+    if (
+        tool in ("python", "json", "xml")
+        and content.strip().startswith("{")
+        and content.strip().endswith("}")
+    ):
         try:
             import json as _json
+
             parsed = _json.loads(content.strip())
             if isinstance(parsed, dict):
                 desc = f"{tool}: misformatted tool call"
@@ -579,11 +727,11 @@ async def execute_tool_block(
                         f"You wrote a JSON object inside a ```{tool}``` block, but that's not a tool call.\n"
                         "To call a tool, use the tool name as the fence tag, e.g.\n"
                         "```resolve_contact\n"
-                        "{\"name\": \"...\"}\n"
+                        '{"name": "..."}\n'
                         "```\n"
                         "or\n"
                         "```send_email\n"
-                        "{\"to\": \"...\", \"subject\": \"...\", \"body\": \"...\"}\n"
+                        '{"to": "...", "subject": "...", "body": "..."}\n'
                         "```"
                     ),
                     "exit_code": 1,
@@ -625,6 +773,7 @@ async def execute_tool_block(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
+
             rec = bg_jobs.launch(_bg_cmd, session_id=session_id)
             short = _bg_cmd.strip().split(chr(10))[0][:80]
             desc = f"bash (background): {short}"
@@ -647,7 +796,7 @@ async def execute_tool_block(
     if tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb, session_id=session_id)
     elif tool == "create_document":
         title = content.split("\n")[0].strip()[:60]
         desc = f"create_document: {title}"
@@ -665,11 +814,20 @@ async def execute_tool_block(
         query = content.split("\n")[0].strip()
         desc = f"search_chats: {query[:80]}"
         result = await do_search_chats(query, owner=owner)
-    elif tool in ("chat_with_model", "create_session", "list_sessions",
-                  "send_to_session", "pipeline",
-                  "manage_session", "manage_memory", "list_models",
-                  "ui_control", "ask_teacher"):
+    elif tool in (
+        "chat_with_model",
+        "create_session",
+        "list_sessions",
+        "send_to_session",
+        "pipeline",
+        "manage_session",
+        "manage_memory",
+        "list_models",
+        "ui_control",
+        "ask_teacher",
+    ):
         from src.ai_interaction import dispatch_ai_tool
+
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
     elif tool == "manage_tasks":
         desc = "manage_tasks"
@@ -795,10 +953,26 @@ async def execute_tool_block(
 
 # Keys handled by the dedicated branches below — never echo them as raw JSON.
 _FORMATTER_HANDLED_KEYS = {
-    "stdout", "stderr", "exit_code", "content", "size",
-    "response", "results", "session_id", "name", "model", "session_name",
-    "success", "path", "action", "title", "doc_id", "version", "applied",
-    "error", "output",
+    "stdout",
+    "stderr",
+    "exit_code",
+    "content",
+    "size",
+    "response",
+    "results",
+    "session_id",
+    "name",
+    "model",
+    "session_name",
+    "success",
+    "path",
+    "action",
+    "title",
+    "doc_id",
+    "version",
+    "applied",
+    "error",
+    "output",
 }
 
 
@@ -818,7 +992,9 @@ def format_tool_result(description: str, result: Dict) -> str:
         if result.get("exit_code") not in (0, None):
             parts.append(f"**exit_code:** {result['exit_code']}")
     elif "content" in result:
-        parts.append(f"**content ({result.get('size', '?')} chars):**\n```\n{result['content']}\n```")
+        parts.append(
+            f"**content ({result.get('size', '?')} chars):**\n```\n{result['content']}\n```"
+        )
     elif "response" in result:
         model = result.get("model", result.get("session_name", ""))
         if model:
@@ -828,7 +1004,9 @@ def format_tool_result(description: str, result: Dict) -> str:
     elif "results" in result:
         parts.append(result["results"])
     elif "session_id" in result and "name" in result:
-        parts.append(f"Session created: **{result['name']}** (id: `{result['session_id']}`, model: {result.get('model', 'unknown')})")
+        parts.append(
+            f"Session created: **{result['name']}** (id: `{result['session_id']}`, model: {result.get('model', 'unknown')})"
+        )
     elif "success" in result:
         if result["success"]:
             parts.append(f"File written: {result['path']} ({result['size']} bytes)")
@@ -837,11 +1015,15 @@ def format_tool_result(description: str, result: Dict) -> str:
     elif "action" in result:
         action = result["action"]
         if action == "create":
-            parts.append(f"Document created: \"{result.get('title', '')}\" (id: {result['doc_id']}, v{result['version']})")
+            parts.append(
+                f'Document created: "{result.get("title", "")}" (id: {result["doc_id"]}, v{result["version"]})'
+            )
         elif action == "update":
-            parts.append(f"Document updated: \"{result.get('title', '')}\" (v{result['version']})")
+            parts.append(f'Document updated: "{result.get("title", "")}" (v{result["version"]})')
         elif action == "edit":
-            parts.append(f'Document edited: "{result.get("title", "")}" (v{result.get("version", "?")}, {result.get("applied", 0)} edit(s) applied)')
+            parts.append(
+                f'Document edited: "{result.get("title", "")}" (v{result.get("version", "?")}, {result.get("applied", 0)} edit(s) applied)'
+            )
     elif "error" in result:
         parts.append(f"**Error:** {result['error']}")
 
