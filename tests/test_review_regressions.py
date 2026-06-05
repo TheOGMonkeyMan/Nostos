@@ -112,8 +112,7 @@ def test_default_chat_does_not_auto_pick_shared_endpoint_for_fresh_user(monkeypa
 
     def scoped_owner_filter(query, model_cls, user, *, include_shared=True):
         query.rows = [
-            row for row in query.rows
-            if row.owner == user or (include_shared and row.owner is None)
+            row for row in query.rows if row.owner == user or (include_shared and row.owner is None)
         ]
         return query
 
@@ -127,9 +126,9 @@ def test_default_chat_does_not_auto_pick_shared_endpoint_for_fresh_user(monkeypa
 
     request = SimpleNamespace(
         state=SimpleNamespace(current_user="fresh"),
-        app=SimpleNamespace(state=SimpleNamespace(
-            auth_manager=SimpleNamespace(is_admin=lambda user: False)
-        )),
+        app=SimpleNamespace(
+            state=SimpleNamespace(auth_manager=SimpleNamespace(is_admin=lambda user: False))
+        ),
     )
 
     assert _default_chat_endpoint()(request) == {
@@ -154,8 +153,7 @@ def test_default_chat_uses_owned_endpoint_as_regular_user_last_resort(monkeypatc
 
     def scoped_owner_filter(query, model_cls, user, *, include_shared=True):
         query.rows = [
-            row for row in query.rows
-            if row.owner == user or (include_shared and row.owner is None)
+            row for row in query.rows if row.owner == user or (include_shared and row.owner is None)
         ]
         return query
 
@@ -169,9 +167,9 @@ def test_default_chat_uses_owned_endpoint_as_regular_user_last_resort(monkeypatc
 
     request = SimpleNamespace(
         state=SimpleNamespace(current_user="fresh"),
-        app=SimpleNamespace(state=SimpleNamespace(
-            auth_manager=SimpleNamespace(is_admin=lambda user: False)
-        )),
+        app=SimpleNamespace(
+            state=SimpleNamespace(auth_manager=SimpleNamespace(is_admin=lambda user: False))
+        ),
     )
 
     assert _default_chat_endpoint()(request) == {
@@ -217,14 +215,16 @@ def test_preset_manager_default_custom_preset_starts_disabled(tmp_path):
 def test_preset_manager_migrates_legacy_default_custom_preset_disabled(tmp_path):
     presets_file = tmp_path / "presets.json"
     presets_file.write_text(
-        json.dumps({
-            "custom": {
-                "name": "Custom",
-                "temperature": 0.7,
-                "max_tokens": 4096,
-                "system_prompt": "You are a helpful, balanced assistant. Match your response style to the user's needs.",
+        json.dumps(
+            {
+                "custom": {
+                    "name": "Custom",
+                    "temperature": 0.7,
+                    "max_tokens": 4096,
+                    "system_prompt": "You are a helpful, balanced assistant. Match your response style to the user's needs.",
+                }
             }
-        }),
+        ),
         encoding="utf-8",
     )
 
@@ -346,7 +346,9 @@ async def test_build_chat_context_incognito_does_not_duplicate_current_user_mess
         incognito=True,
     )
 
-    user_messages = [m for m in ctx.messages if m.get("role") == "user" and m.get("content") == "hello"]
+    user_messages = [
+        m for m in ctx.messages if m.get("role") == "user" and m.get("content") == "hello"
+    ]
     assert len(user_messages) == 1
 
 
@@ -413,7 +415,11 @@ def test_public_agent_policy_hides_sensitive_tools(monkeypatch):
     assert "send_email" in blocked
     assert "read_file" in blocked
     assert "app_api" in blocked
-    assert "manage_tasks" in blocked
+    # Phase 1.2 (operator-approved capability tiers, ADR-003/017): own-scope
+    # STATEFUL tools are now usable by an authenticated non-admin for their own
+    # data, so manage_tasks is no longer hidden. The genuinely-privileged tools
+    # above stay blocked.
+    assert "manage_tasks" not in blocked
 
 
 @pytest.mark.asyncio

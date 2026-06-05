@@ -47,10 +47,25 @@ def test_stateful_allowed_to_authenticated_user_denied_to_anon(monkeypatch):
     assert authorize("manage_memory", owner=None).allowed is False  # anonymous
 
 
-def test_new_model_never_allows_a_denylist_privileged_tool_to_non_admin(monkeypatch):
-    # Safety: every currently-blocked tool that the new model tiers PRIVILEGED
-    # stays blocked for a non-admin (no weakening of the genuinely-privileged set).
+def test_privileged_tools_denied_to_non_admin(monkeypatch):
+    # The genuinely-privileged tools (host/runtime/external/secrets) + unknown +
+    # mcp__* are denied to a non-admin. (The denylist constant is gone in 1.2;
+    # the registry is the source of truth.)
     monkeypatch.setattr(ts, "owner_is_admin_or_single_user", lambda owner: False)
-    for tool in ts.NON_ADMIN_BLOCKED_TOOLS:
-        if ts.policy_for(tool).risk_tier is RiskTier.PRIVILEGED:
-            assert authorize(tool, owner="alice").allowed is False, tool
+    for tool in (
+        "bash",
+        "python",
+        "read_file",
+        "write_file",
+        "send_email",
+        "delete_email",
+        "manage_settings",
+        "manage_tokens",
+        "vault_get",
+        "serve_model",
+        "api_call",
+        "app_api",
+        "a_brand_new_unlisted_tool",
+        "mcp__email__send_email",
+    ):
+        assert authorize(tool, owner="alice").allowed is False, tool
