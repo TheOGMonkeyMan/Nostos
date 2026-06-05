@@ -10,49 +10,16 @@ from typing import Optional, Set
 logger = logging.getLogger(__name__)
 
 
-# Tools regular/public users must not execute directly. These either expose
-# server/runtime access, sensitive user data, external messaging, persistent
-# state changes, or generic loopback/integration surfaces.
-NON_ADMIN_BLOCKED_TOOLS = {
-    "bash",
-    "python",
-    "read_file",
-    "write_file",
-    "search_chats",
-    "manage_memory",
-    "manage_skills",
-    "manage_tasks",
-    "manage_endpoints",
-    "manage_mcp",
-    "manage_webhooks",
-    "manage_tokens",
-    "manage_documents",
-    "manage_settings",
-    "api_call",
-    "app_api",
-    "send_email",
-    "reply_to_email",
-    "list_emails",
-    "read_email",
-    "resolve_contact",
-    "manage_contact",
-    "manage_calendar",
-    "vault_search",
-    "vault_get",
-    "vault_unlock",
-    "download_model",
-    "serve_model",
-    "stop_served_model",
-    "cancel_download",
-    "adopt_served_model",
-}
-
-
 def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
-    """Return True when a non-admin/public user must not execute this tool."""
+    """True when a non-admin user must not execute this tool: i.e. its policy
+    tier is PRIVILEGED. Unregistered tools and `mcp__*` default to PRIVILEGED
+    (default-deny), so a tool added without a policy is closed, not exposed. The
+    risk-tier registry below is the single source of truth - no denylist
+    (Phase 1.2 / ADR-003). STATEFUL + READ_ONLY tools are NOT blocked here
+    (stateful tools are the user's own scope)."""
     if not tool_name:
         return False
-    return tool_name in NON_ADMIN_BLOCKED_TOOLS or tool_name.startswith("mcp__")
+    return policy_for(tool_name).risk_tier is RiskTier.PRIVILEGED
 
 
 def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
@@ -70,10 +37,12 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
 
 
 def blocked_tools_for_owner(owner: Optional[str]) -> Set[str]:
-    """Tools to hide/disable for this owner under public-user policy."""
+    """Registered tools to hide/disable for this owner: the PRIVILEGED ones for
+    non-admins (admins see everything). Unknown tools are blocked at execution by
+    is_public_blocked_tool's default-deny."""
     if owner_is_admin_or_single_user(owner):
         return set()
-    return set(NON_ADMIN_BLOCKED_TOOLS)
+    return {name for name, pol in _TOOL_POLICIES.items() if pol.risk_tier is RiskTier.PRIVILEGED}
 
 
 # ===========================================================================
