@@ -1,8 +1,10 @@
-"""Phase 1.1c: opt-in routing of the agent's bash/python tools through the sandbox.
+"""Phase 1.1c/1.1e: routing of the agent's bash/python tools through the sandbox.
 
-Default (SANDBOX_BACKEND unset) = legacy direct execution, unchanged. When set,
-bash/python run through the configured sandbox in the per-session workspace, and
-fail CLOSED if the requested backend is unavailable on this host.
+DEFAULT-ON (ADR-020): SANDBOX_BACKEND unset/empty resolves to 'auto' (strongest
+available jail for this OS, degrading to pathjail, never no-isolation). bash/python
+always run through the sandbox in the per-session workspace, and an EXPLICIT
+backend fails CLOSED if unavailable on this host. SANDBOX_BACKEND=none opts into
+dev-only direct-host execution (still in the workspace, via NoSandbox).
 """
 
 import sys
@@ -13,19 +15,27 @@ from src.tool_execution import _direct_fallback, _sandbox_backend
 
 
 def test_sandbox_backend_gate(monkeypatch):
+    # Default-on: unset/empty => 'auto'. An explicit value is passed through.
     monkeypatch.delenv("SANDBOX_BACKEND", raising=False)
-    assert _sandbox_backend() is None
+    assert _sandbox_backend() == "auto"
     monkeypatch.setenv("SANDBOX_BACKEND", "")
-    assert _sandbox_backend() is None
+    assert _sandbox_backend() == "auto"
     monkeypatch.setenv("SANDBOX_BACKEND", " none ")
     assert _sandbox_backend() == "none"
 
 
-async def test_bash_unset_runs_direct(monkeypatch):
+async def test_bash_unset_routes_through_default_auto_sandbox(monkeypatch):
+    # With SANDBOX_BACKEND unset, bash now runs sandboxed via 'auto' (pathjail on
+    # this dev box / bubblewrap on a bwrap Linux host), in the per-session
+    # workspace - never raw on the host cwd.
     monkeypatch.delenv("SANDBOX_BACKEND", raising=False)
-    res = await _direct_fallback("bash", "echo hi", session_id="t")
+    assert _sandbox_backend() == "auto"
+    res = await _direct_fallback("bash", "echo hi", session_id="auto-default")
     assert res["exit_code"] == 0
     assert "hi" in res["output"]
+    from src.sandbox import clean_workspace
+
+    clean_workspace("auto-default")
 
 
 async def test_python_routes_through_sandbox_into_workspace(monkeypatch):
