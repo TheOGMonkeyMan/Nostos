@@ -309,12 +309,18 @@ def _split_bg_marker(content: str):
 
 
 def _sandbox_backend() -> Optional[str]:
-    """Opt-in gate (Phase 1.1c). The agent's bash/python run sandboxed ONLY when
-    SANDBOX_BACKEND is explicitly set (auto|bubblewrap|pathjail|docker|none).
-    Unset = legacy direct-host behaviour (zero change). The default flips on after
-    trusted mode (1.1d)."""
+    """Sandbox gate, now DEFAULT-ON (Phase 1.1e / ADR-020). The agent's
+    bash/python always run sandboxed: SANDBOX_BACKEND unset or empty resolves to
+    'auto' (the strongest AVAILABLE jail for this OS - bubblewrap on Linux,
+    degrading to pathjail when bwrap is unavailable; pathjail on Mac/Windows -
+    never no-isolation). Set an explicit backend (bubblewrap|pathjail|docker) to
+    pin it, or SANDBOX_BACKEND=none for dev-only direct-host execution (which
+    still runs in the per-session workspace via NoSandbox).
+
+    Rollback: restore the previous `else None` to make unset = legacy direct-host
+    streaming execution (the create_subprocess path below becomes live again)."""
     val = os.getenv("SANDBOX_BACKEND")
-    return val.strip() if val and val.strip() else None
+    return val.strip() if val and val.strip() else "auto"
 
 
 async def _run_sandboxed(
@@ -429,8 +435,12 @@ async def _direct_fallback(
             if _sbx:
                 # Inside bubblewrap the host venv interpreter is not on the bound
                 # /usr, so resolve python3 from PATH; other backends keep the
-                # running interpreter.
-                py = "python3" if _sbx == "bubblewrap" else (sys.executable or "python")
+                # running interpreter. Resolve `auto` to its concrete backend
+                # first so auto->bubblewrap (Linux) also picks python3.
+                from src.sandbox import resolve_available_backend
+
+                _resolved = resolve_available_backend(_sbx)
+                py = "python3" if _resolved == "bubblewrap" else (sys.executable or "python")
                 return await _run_sandboxed(
                     _sbx, [py, "-I", "-c", content], DEFAULT_PYTHON_TIMEOUT, session_id
                 )

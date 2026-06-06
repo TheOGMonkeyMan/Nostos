@@ -7,7 +7,12 @@ that selects one per SANDBOX_BACKEND will be re-exported here as they land.
 from .base import Mount, Sandbox, SandboxLimits, SandboxResult
 from .bubblewrap import BubblewrapSandbox
 from .config import network_granted, parse_mounts, trusted_grants
-from .factory import SandboxUnavailable, get_sandbox, resolve_backend_name
+from .factory import (
+    SandboxUnavailable,
+    get_sandbox,
+    resolve_available_backend,
+    resolve_backend_name,
+)
 from .nosandbox import NoSandbox
 from .pathjail import PathJailSubprocess
 from .workspace import clean_workspace, ensure_workspace, workspace_path
@@ -22,6 +27,7 @@ __all__ = [
     "PathJailSubprocess",
     "get_sandbox",
     "resolve_backend_name",
+    "resolve_available_backend",
     "SandboxUnavailable",
     "ensure_workspace",
     "clean_workspace",

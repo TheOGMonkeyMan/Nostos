@@ -154,16 +154,46 @@ def test_factory_pathjail_returns_pathjail():
 
 def test_factory_auto_resolves_per_os():
     if _BWRAP:
-        # Linux + bwrap: auto -> bubblewrap.
+        # Linux + bwrap: auto -> bubblewrap (strongest).
         assert isinstance(get_sandbox("auto"), BubblewrapSandbox)
-    elif sys.platform.startswith("linux"):
-        # Linux without bwrap: the per-OS backend is unavailable -> fail closed,
-        # never silently run unsandboxed.
-        with pytest.raises(SandboxUnavailable):
-            get_sandbox("auto")
     else:
-        # mac / windows: auto -> pathjail (the weak fallback).
+        # Linux-without-bwrap and mac/windows: auto DEGRADES to the weak pathjail
+        # fallback (ADR-020) rather than failing closed - never no-isolation, so
+        # the agent stays functional. Explicit 'bubblewrap' still fails closed
+        # (see test_factory_bubblewrap_availability_is_host_gated).
         assert isinstance(get_sandbox("auto"), PathJailSubprocess)
+
+
+def test_factory_auto_degrades_when_strong_backend_unavailable(monkeypatch):
+    # Simulate "Linux without bwrap" on any host: the preferred backend reports
+    # unavailable, so auto degrades to pathjail instead of raising.
+    import src.sandbox.factory as fac
+
+    monkeypatch.setattr(fac, "_auto_preferences", lambda: ["bubblewrap", "pathjail"])
+    monkeypatch.setattr(fac.BubblewrapSandbox, "is_available", staticmethod(lambda: False))
+    assert isinstance(fac.get_sandbox("auto"), PathJailSubprocess)
+    # resolve_available_backend reports the degraded concrete choice...
+    assert fac.resolve_available_backend("auto") == "pathjail"
+
+
+def test_auto_never_degrades_to_no_isolation():
+    # The contract that makes default-on safe: auto's candidate list never
+    # includes NoSandbox, so it can never silently run unsandboxed.
+    import src.sandbox.factory as fac
+
+    assert "none" not in fac._auto_preferences()
+
+
+def test_explicit_backend_is_not_degraded(monkeypatch):
+    # An explicit (non-auto) backend is returned verbatim by
+    # resolve_available_backend and fails closed in get_sandbox if unavailable -
+    # it is never silently swapped for a weaker one.
+    import src.sandbox.factory as fac
+
+    assert fac.resolve_available_backend("bubblewrap") == "bubblewrap"
+    monkeypatch.setattr(fac.BubblewrapSandbox, "is_available", staticmethod(lambda: False))
+    with pytest.raises(SandboxUnavailable):
+        fac.get_sandbox("bubblewrap")
 
 
 def test_factory_bubblewrap_availability_is_host_gated():
