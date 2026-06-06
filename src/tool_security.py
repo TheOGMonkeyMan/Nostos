@@ -22,14 +22,36 @@ def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
     return policy_for(tool_name).risk_tier is RiskTier.PRIVILEGED
 
 
-def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
-    """Return True for admins, or when auth is not configured yet."""
+def owner_is_admin_or_single_user(
+    owner: Optional[str],
+    origin: "Optional[RequestOrigin]" = None,
+) -> bool:
+    """Return True for admins, or - in unconfigured first-run mode - for a
+    LOOPBACK caller only.
+
+    Origin-aware fail-open (Phase 1.2c / ADR-021): the "auth not configured yet
+    => treat as admin" convenience now applies to LOOPBACK requests only. A
+    REMOTE caller on an unconfigured instance fails CLOSED (not admin), so an
+    instance accidentally bound to a non-loopback interface with auth unset does
+    not hand admin (shell/python/email/secrets) to the network.
+
+    Defense in depth: `auth_helpers.require_user` already rejects non-loopback
+    callers in unconfigured mode at the route layer; this hardens the tool layer
+    if that gate is bypassed (LOCALHOST_BYPASS, AUTH_ENABLED=false, SSRF from a
+    sibling service).
+
+    `origin` defaults to LOOPBACK so existing callers that do not yet thread the
+    request origin keep their current behaviour; `authorize()` passes the real
+    origin. Wiring the live tool gate to pass a real origin is a follow-up."""
+    if origin is None:
+        origin = RequestOrigin.LOOPBACK
     try:
         from core.auth import AuthManager
 
         auth = AuthManager()
         if not auth.is_configured:
-            return True
+            # First-run convenience, but never for remote callers.
+            return origin is RequestOrigin.LOOPBACK
         return bool(owner and auth.is_admin(owner))
     except Exception as exc:
         logger.warning("Unable to evaluate owner admin status: %s", exc)
@@ -190,12 +212,15 @@ def authorize(
 
     READ_ONLY  -> any caller. STATEFUL -> authenticated user (own scope).
     PRIVILEGED -> admin only. Unknown tool -> privileged -> denied.
-    Fail-open (auth unconfigured => admin) is preserved for now via
-    owner_is_admin_or_single_user; tightening it is a separate follow-up.
+    The unconfigured fail-open is now ORIGIN-AWARE (Phase 1.2c / ADR-021): a
+    REMOTE caller on an unconfigured instance is NOT auto-admin, so a privileged
+    tool is denied to the network even when auth is unset. `origin` is threaded
+    into the admin check here; wiring the LIVE tool gate to pass a real origin
+    is a follow-up.
     """
     policy = policy_for(tool_name)
     tier = policy.risk_tier
-    is_admin = owner_is_admin_or_single_user(owner)
+    is_admin = owner_is_admin_or_single_user(owner, origin)
 
     if tier is RiskTier.READ_ONLY:
         return Decision(True, policy.requires_approval, "read-only tool")
