@@ -74,3 +74,23 @@ async def test_tolerates_code_fence():
     out = await process("...", _Triage, label="email", model_call=mc)
     assert out.intent == "a"
     assert out.sender == "b"
+
+
+async def test_instructions_go_in_trusted_system_prompt_not_the_data_block():
+    # Domain rules passed via `instructions` are TRUSTED: they appear in the
+    # system prompt, never inside the untrusted data block (so the source text
+    # cannot impersonate or rewrite them).
+    mc = _fake_model('{"intent": "x", "sender": "y"}')
+    await process(
+        "RAW BODY",
+        _Triage,
+        label="email",
+        model_call=mc,
+        instructions="SCORE_RUBRIC_MARKER: be terse",
+        )
+    msgs = mc.captured["messages"]
+    assert "SCORE_RUBRIC_MARKER" in msgs[0]["content"]  # system / trusted
+    assert "SCORE_RUBRIC_MARKER" not in msgs[1]["content"]  # untrusted data block
+    # ...and the untrusted body is still wrapped, flagged untrusted.
+    assert msgs[1]["metadata"]["trusted"] is False
+    assert "RAW BODY" in msgs[1]["content"]

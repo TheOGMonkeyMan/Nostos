@@ -98,6 +98,12 @@ DEFAULT_SETTINGS = {
     "reminder_llm_synthesis": False,
     "reminder_ntfy_topic": "Reminders",
     "reminder_email_to": "",
+    # Structural prompt-injection quarantine for autonomous untrusted-text paths
+    # (email triage, etc. - Phase 1.4 / ADR-019,022). OFF by default: when on,
+    # untrusted email bodies are reduced to a schema-validated struct via a
+    # tool-less model call with data/instruction separation, instead of being
+    # inlined into the classifier prompt. Reversible; zero behaviour change off.
+    "quarantine_enabled": False,
     # Email triage scanner rules. Running/paused state and schedule live in
     # Tasks via the built-in `check_email_urgency` task.
     "urgent_email_prompt": (
