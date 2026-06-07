@@ -1055,4 +1055,9 @@ def format_tool_result(description: str, result: Dict) -> str:
         except (TypeError, ValueError):
             pass
 
-    return "\n".join(parts)
+    # Redact known secrets before this text re-enters the model context
+    # (Phase 1.5 / ADR-024): tool output is the most likely vector for a stored
+    # API key / token / private key to leak into model-bound messages.
+    from src.redaction import redact
+
+    return redact("\n".join(parts))
