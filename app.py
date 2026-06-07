@@ -53,6 +53,12 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
+# Redact known secrets from all log output before handlers emit it
+# (Phase 1.5 / ADR-024). Installed right after basicConfig so the root
+# handler exists; filters live on handlers to also catch propagated records.
+from src.redaction import install_log_redaction as _install_log_redaction
+
+_install_log_redaction()
 logger = logging.getLogger(__name__)
 
 # ========= APP =========
