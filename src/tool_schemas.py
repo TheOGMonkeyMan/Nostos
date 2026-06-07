@@ -25,7 +25,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command (full access)",
+            "description": "Run a shell command. Sandboxed by default: runs in an isolated per-session workspace with no network or host directories unless explicitly granted (see SANDBOX_BACKEND in SECURITY.md).",
             "parameters": {
                 "type": "object",
                 "properties": {
