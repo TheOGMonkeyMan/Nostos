@@ -8,7 +8,9 @@ scheduler without needing an LLM call.
 import logging
 import os
 from datetime import datetime
-from typing import Tuple
+from typing import List, Tuple
+
+from pydantic import BaseModel, Field
 
 from src.auth_helpers import owner_filter
 from core.platform_compat import IS_WINDOWS, find_bash
@@ -1580,6 +1582,157 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
+class _EmailTriage(BaseModel):
+    """Schema the quarantine extracts from an untrusted email body (Phase 1.4b)."""
+
+    score: int = Field(
+        0,
+        description="0 trivial/promotional, 1 informational no reply, 2 reply within a day, 3 urgent reply now (deadline/blocker)",
+    )
+    tags: List[str] = Field(
+        default_factory=list,
+        description="zero or more of: newsletter, marketing, notification, finance, bills, receipt, travel, security, shopping, social, work, personal, calendar",
+    )
+    spam: bool = Field(
+        False,
+        description="true for scams, phishing, junk, cold sales, generic ads, or no-personal-action bulk mail",
+    )
+    reason: str = Field("", description="one short phrase")
+
+
+_TRIAGE_TAG_REMAP = {"promo": "marketing"}
+
+_TRIAGE_RUBRIC = (
+    "Triage ONE unread email into the fields above.\n"
+    "score: 0 = trivial / promotional; 1 = informational, no reply needed; "
+    "2 = should reply within a day; 3 = urgent, reply now (deadline, blocker).\n"
+    "Use 'marketing' for ads, promos, sales, offers, cold sales. Use 'newsletter' "
+    "for newsletters, digests, recurring content. spam=true for scams, phishing, "
+    "junk, cold sales, generic ads, or no-personal-action bulk mail.\n"
+    "If the body says 'I'm outside' / 'waiting outside' / 'at the door' / "
+    "'locked out' / 'can't get in', score 3 unless clearly historical."
+)
+
+
+def _normalize_triage(score, raw_tags, spam, reason, category_tags) -> dict:
+    """Coerce loose verdict output into {score,tags,spam,reason}, filtering tags to
+    the allowed category set. Shared by the legacy and quarantined paths."""
+    try:
+        score_i = int(score)
+    except (TypeError, ValueError):
+        score_i = 0
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    tags: List[str] = []
+    for t in raw_tags or []:
+        if not isinstance(t, str):
+            continue
+        tag = t.strip().lower().replace("_", "-")
+        tag = _TRIAGE_TAG_REMAP.get(tag, tag)
+        if tag in category_tags and tag not in tags:
+            tags.append(tag)
+    if isinstance(spam, bool):
+        spam_b = spam
+    elif isinstance(spam, (int, float)):
+        spam_b = bool(spam)
+    else:
+        spam_b = str(spam or "").strip().lower() in {"1", "true", "yes", "y"}
+    return {"score": score_i, "tags": tags, "spam": spam_b, "reason": str(reason or "")}
+
+
+async def _email_triage_verdict(candidates, urgency_prompt, item, category_tags, *, quarantined):
+    """Return {'score','tags','spam','reason'} for one email, or None if the model
+    gave nothing usable.
+
+    When `quarantined`, the untrusted body is reduced via `src.quarantine` (a
+    tool-less model call, data/instruction separation, schema-validated), so an
+    injected instruction in the body cannot rewrite the triage rules. On a
+    quarantine failure we abort this email (return None) - never fall back to
+    feeding the raw body inline."""
+    from src.llm_core import llm_call_async_with_fallback
+
+    sender = item.get("from", "") or ""
+    subject = item.get("subject", "") or ""
+    body = item.get("body", "") or ""
+
+    if quarantined:
+        from src.quarantine import QuarantineError
+        from src.quarantine import process as _q_process
+
+        async def _model_call(messages):
+            return await llm_call_async_with_fallback(
+                candidates, messages, temperature=0.1, max_tokens=220, timeout=30
+            )
+
+        instructions = _TRIAGE_RUBRIC + (
+            f"\n\nUser's rules:\n{urgency_prompt}" if urgency_prompt else ""
+        )
+        # From/Subject travel WITH the body inside the untrusted data block - the
+        # model still sees them, but as DATA, not instructions.
+        source = f"From: {sender}\nSubject: {subject}\n\n{body}"
+        try:
+            v = await _q_process(
+                source,
+                _EmailTriage,
+                label=f"email-triage:{sender[:80]}",
+                instructions=instructions,
+                model_call=_model_call,
+            )
+        except QuarantineError as exc:
+            logger.debug(f"urgency: quarantine aborted triage: {exc}")
+            return None
+        return _normalize_triage(v.score, v.tags, v.spam, v.reason, category_tags)
+
+    # ── Legacy inline path (default; behaviour unchanged) ──
+    prompt = (
+        "You are triaging ONE unread email. Return ONLY JSON: "
+        "{\"score\":0|1|2|3,\"tags\":[\"...\"],\"spam\":false,"
+        "\"reason\":\"one short phrase\"}.\n"
+        "0 = trivial / promotional · 1 = informational, no reply needed · "
+        "2 = should reply within a day · 3 = urgent, reply now (deadline, blocker).\n\n"
+        "Allowed tags: newsletter, marketing, notification, finance, bills, receipt, "
+        "travel, security, shopping, social, work, personal, calendar.\n"
+        "Use marketing for ads, promos, sales, offers, and cold sales. Use newsletter "
+        "for newsletters, digests, and recurring content. spam=true for scams, phishing, "
+        "junk, cold sales, generic ads, or no-personal-action bulk mail.\n"
+        "Important: 'I'm outside', 'I am outside', 'waiting outside', 'at the door', "
+        "'locked out', or 'can't get in' means score 3 unless clearly historical.\n\n"
+        f"User's rules:\n{urgency_prompt}\n\n"
+        f"Email:\nFrom: {sender}\nSubject: {subject}\n"
+        f"Snippet:\n{body}\n"
+    )
+    try:
+        raw = await llm_call_async_with_fallback(
+            candidates,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=220,
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.debug(f"urgency: legacy triage call failed: {exc}")
+        return None
+    import json as _json
+
+    txt = (raw or "").strip()
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        nl = txt.find("\n")
+        if nl >= 0:
+            txt = txt[nl + 1:]
+    s = txt.find("{")
+    e = txt.rfind("}")
+    if s < 0 or e <= s:
+        return None
+    try:
+        obj = _json.loads(txt[s:e + 1])
+    except (ValueError, TypeError):
+        return None
+    return _normalize_triage(
+        obj.get("score", 0), obj.get("tags"), obj.get("spam"), obj.get("reason", ""), category_tags
+    )
+
+
 async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
     """Scan unread emails across all accounts, LLM-triage new ones, cache
     per-UID verdicts, tag the inbox, and fire a reminder when a previously
@@ -1655,6 +1808,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             raise TaskNoop("no email accounts configured")
 
         urgency_prompt = settings.get("urgent_email_prompt", "")
+        _quarantine_on = bool(settings.get("quarantine_enabled", False))
         per_uid_scores = {}   # key = "<acc_id>:<uid>" → {"score": 0-3, "reason": "..."}
         all_unread_keys = set()  # for cache pruning
         llm_attempts = 0
@@ -1781,71 +1935,27 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 # Skip uids we couldn't fetch (no subject/from/body).
                 if not item.get("subject") and not item.get("from"):
                     continue
-                # ── LLM-classify. JSON-only response; bullet-proof parse.
+                # ── LLM-classify. Optionally via the structural injection
+                # quarantine (data/instruction separation + schema validation +
+                # tool-less model) when `quarantine_enabled` is set; otherwise the
+                # legacy inline-prompt parse. Both yield score/tags/spam/reason.
                 llm_attempts += 1
-                prompt = (
-                    "You are triaging ONE unread email. Return ONLY JSON: "
-                    "{\"score\":0|1|2|3,\"tags\":[\"...\"],\"spam\":false,"
-                    "\"reason\":\"one short phrase\"}.\n"
-                    "0 = trivial / promotional · 1 = informational, no reply needed · "
-                    "2 = should reply within a day · 3 = urgent, reply now (deadline, blocker).\n\n"
-                    "Allowed tags: newsletter, marketing, notification, finance, bills, receipt, "
-                    "travel, security, shopping, social, work, personal, calendar.\n"
-                    "Use marketing for ads, promos, sales, offers, and cold sales. Use newsletter "
-                    "for newsletters, digests, and recurring content. spam=true for scams, phishing, "
-                    "junk, cold sales, generic ads, or no-personal-action bulk mail.\n"
-                    "Important: 'I'm outside', 'I am outside', 'waiting outside', 'at the door', "
-                    "'locked out', or 'can't get in' means score 3 unless clearly historical.\n\n"
-                    f"User's rules:\n{urgency_prompt}\n\n"
-                    f"Email:\nFrom: {item.get('from','')}\nSubject: {item.get('subject','')}\n"
-                    f"Snippet:\n{item.get('body','')}\n"
+                _v = await _email_triage_verdict(
+                    candidates, urgency_prompt, item, CATEGORY_TAGS,
+                    quarantined=_quarantine_on,
                 )
+                if _v is None:
+                    failed_classifications.append({
+                        "subject": item.get("subject") or "(no subject)",
+                        "from": item.get("from") or "",
+                        "reason": "model returned no usable verdict",
+                    })
+                    continue
                 try:
-                    raw = await llm_call_async_with_fallback(
-                        candidates,
-                        [{"role": "user", "content": prompt}],
-                        temperature=0.1, max_tokens=220, timeout=30,
-                    )
-                    # Tolerant JSON-parse: strip code fences if present.
-                    txt = (raw or "").strip()
-                    if txt.startswith("```"):
-                        txt = txt.strip("`")
-                        # Drop a leading "json\n" or any tag.
-                        nl = txt.find("\n")
-                        if nl >= 0:
-                            txt = txt[nl + 1:]
-                    # Find first { ... } in the response.
-                    s = txt.find("{")
-                    e = txt.rfind("}")
-                    if s < 0 or e <= s:
-                        failed_classifications.append({
-                            "subject": item.get("subject") or "(no subject)",
-                            "from": item.get("from") or "",
-                            "reason": "model returned no JSON",
-                        })
-                        continue
-                    obj = _json.loads(txt[s:e + 1])
-                    score = int(obj.get("score", 0))
-                    reason = str(obj.get("reason", ""))[:200]
-                    raw_tags = obj.get("tags") or []
-                    if isinstance(raw_tags, str):
-                        raw_tags = [raw_tags]
-                    tags = []
-                    for t in raw_tags:
-                        if not isinstance(t, str):
-                            continue
-                        tag = t.strip().lower().replace("_", "-")
-                        if tag == "promo":
-                            tag = "marketing"
-                        if tag in CATEGORY_TAGS and tag not in tags:
-                            tags.append(tag)
-                    _spam_raw = obj.get("spam")
-                    if isinstance(_spam_raw, bool):
-                        spam = _spam_raw
-                    elif isinstance(_spam_raw, (int, float)):
-                        spam = bool(_spam_raw)
-                    else:
-                        spam = str(_spam_raw or "").strip().lower() in {"1", "true", "yes", "y"}
+                    score = int(_v["score"])
+                    reason = str(_v["reason"])[:200]
+                    tags = list(_v["tags"])
+                    spam = bool(_v["spam"])
                     _blob = f"{item.get('headers','')}\n{item.get('subject','')}\n{item.get('body','')}".lower()
                     if _re.search(r"\b(i'?m|i am|im|we'?re|we are)\s+outside\b", _blob) or _re.search(
                         r"\b(waiting outside|at the door|locked out|can'?t get in|cannot get in)\b", _blob
