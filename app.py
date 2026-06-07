@@ -134,6 +134,37 @@ app.state.auth_manager = auth_manager
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
 LOCALHOST_BYPASS = os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
 
+
+def _log_security_posture() -> None:
+    """Loud startup warning for network-exposure footguns (Phase 1.2c / ADR-023).
+
+    Does NOT refuse to start: the auth middleware already 401s remote callers
+    when auth is unconfigured, and `require_user` re-checks loopback at the route
+    layer. This just makes a risky posture visible at boot so a network-exposed
+    instance with auth off / bypassed isn't silently trusted. The bind host lives
+    in the uvicorn launch command (e.g. the Docker image binds 0.0.0.0), so the
+    process can't reliably self-detect it - hence a warning, not a hard gate."""
+    risky = []
+    if not AUTH_ENABLED:
+        risky.append("AUTH_ENABLED=false (authentication middleware OFF)")
+    if LOCALHOST_BYPASS:
+        risky.append("LOCALHOST_BYPASS=true (loopback callers skip auth)")
+    try:
+        if not auth_manager.is_configured:
+            risky.append("no users configured yet (first-run fail-open)")
+    except Exception:
+        pass
+    if risky:
+        logger.warning(
+            "SECURITY POSTURE: %s. If this server is bound to a non-loopback "
+            "interface (e.g. 0.0.0.0), configure authentication and keep "
+            "LOCALHOST_BYPASS=false before exposing it to a network.",
+            "; ".join(risky),
+        )
+
+
+_log_security_posture()
+
 if AUTH_ENABLED:
     AUTH_EXEMPT_EXACT = {
         "/api/auth/setup",
