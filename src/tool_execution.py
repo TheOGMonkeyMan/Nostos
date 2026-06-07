@@ -681,6 +681,49 @@ async def execute_tool_block(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
 ) -> Tuple[str, Dict]:
+    """Execute a single tool block and append an audit record (Phase 1.3b).
+
+    Thin wrapper over `_execute_tool_block_impl`: it observes the returned
+    (description, result) and records one append-only audit line (tool, owner,
+    outcome, sha256 args hash). Auditing is best-effort and never alters the
+    result or breaks execution."""
+    desc, result = await _execute_tool_block_impl(
+        block, session_id, disabled_tools, owner, progress_cb
+    )
+    try:
+        from src.audit_log import record as _audit_record
+
+        tool = getattr(block, "tool_type", None)
+        content = getattr(block, "content", None)
+        if isinstance(desc, str) and desc.endswith("BLOCKED"):
+            outcome = "blocked"
+        elif isinstance(result, dict) and (
+            result.get("error") or (result.get("exit_code") not in (0, None))
+        ):
+            outcome = "error"
+        else:
+            outcome = "ok"
+        detail = None
+        if isinstance(result, dict) and result.get("error"):
+            from src.redaction import redact
+
+            detail = redact(str(result.get("error")))
+        _audit_record(
+            tool, owner, outcome,
+            args=content, session_id=session_id, detail=detail,
+        )
+    except Exception:
+        pass  # auditing must never break the tool path
+    return desc, result
+
+
+async def _execute_tool_block_impl(
+    block: Any,
+    session_id: Optional[str] = None,
+    disabled_tools: Optional[set] = None,
+    owner: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
     `progress_cb` is forwarded to long-running subprocess tools
