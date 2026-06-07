@@ -622,3 +622,51 @@ def test_web_fetch_guard_blocks_redirect_into_private(monkeypatch):
     with _pytest.raises(httpx.RequestError) as exc:
         content._get_public_url("http://public.example/start", headers={}, timeout=5)
     assert "non-public" in str(exc.value)
+
+
+# ── Phase 1.2c: origin-aware unconfigured fail-open (ADR-021/023) ───────────
+# Lock in that the "auth not configured yet => treat as admin" first-run
+# convenience is granted for LOOPBACK callers only. A REMOTE caller on an
+# unconfigured instance must fail CLOSED at the capability layer, even though
+# the auth middleware already 401s such callers at the front door (defense in
+# depth - this guards the tool layer if that gate is ever bypassed).
+
+
+def _stub_unconfigured_auth(monkeypatch):
+    """Make `from core.auth import AuthManager` yield an UNCONFIGURED manager."""
+    mod = types.ModuleType("core.auth")
+
+    class _Unconfigured:
+        is_configured = False
+
+        def is_admin(self, username):
+            return False
+
+    mod.AuthManager = _Unconfigured
+    monkeypatch.setitem(sys.modules, "core.auth", mod)
+
+
+def test_unconfigured_fail_open_denies_remote_callers(monkeypatch):
+    from src.tool_security import RequestOrigin, owner_is_admin_or_single_user
+
+    _stub_unconfigured_auth(monkeypatch)
+    # Loopback first-run convenience holds (single-user local)...
+    assert owner_is_admin_or_single_user("anyone", RequestOrigin.LOOPBACK) is True
+    assert owner_is_admin_or_single_user(None, RequestOrigin.LOOPBACK) is True
+    # ...default origin (un-threaded callers, e.g. scheduled tasks) = loopback...
+    assert owner_is_admin_or_single_user("anyone") is True
+    # ...but a REMOTE caller on an unconfigured instance is NOT admin.
+    assert owner_is_admin_or_single_user("anyone", RequestOrigin.REMOTE) is False
+    assert owner_is_admin_or_single_user(None, RequestOrigin.REMOTE) is False
+    assert owner_is_admin_or_single_user("", RequestOrigin.REMOTE) is False
+
+
+def test_authorize_denies_privileged_tools_to_remote_when_unconfigured(monkeypatch):
+    from src.tool_security import RequestOrigin, authorize
+
+    _stub_unconfigured_auth(monkeypatch)
+    # Loopback first-run: privileged tool allowed (single-user convenience).
+    assert authorize("bash", owner=None, origin=RequestOrigin.LOOPBACK).allowed is True
+    # Remote caller on the same unconfigured instance: privileged tools DENIED.
+    for tool in ("bash", "python", "send_email", "manage_settings", "vault_get"):
+        assert authorize(tool, owner=None, origin=RequestOrigin.REMOTE).allowed is False, tool
