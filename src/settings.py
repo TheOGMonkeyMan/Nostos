@@ -104,6 +104,11 @@ DEFAULT_SETTINGS = {
     # tool-less model call with data/instruction separation, instead of being
     # inlined into the classifier prompt. Reversible; zero behaviour change off.
     "quarantine_enabled": False,
+    # Human-in-the-loop approval for privileged tool calls (Phase 1.3a / ADR-027).
+    # OFF by default: when on AND an approval channel is present, privileged tools
+    # pause for an approve/deny decision before running. Fail-closed (deny on
+    # timeout). Zero behaviour change when off or when no channel is wired.
+    "approvals_enabled": False,
     # Email triage scanner rules. Running/paused state and schedule live in
     # Tasks via the built-in `check_email_urgency` task.
     "urgent_email_prompt": (

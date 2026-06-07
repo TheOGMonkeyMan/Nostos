@@ -674,22 +674,76 @@ async def _direct_fallback(
 # ---------------------------------------------------------------------------
 
 
+async def _approval_blocked(
+    tool: Optional[str],
+    owner: Optional[str],
+    content: Any,
+    session_id: Optional[str],
+    approval_emit,
+) -> Optional[Tuple[str, Dict]]:
+    """If human approval is required and DENIED, return a BLOCKED (desc, result)
+    so the tool never runs; otherwise return None (proceed). Phase 1.3a / ADR-027.
+
+    Engages only when approvals are enabled AND an approval channel (`emit`) is
+    present AND the tool's policy requires approval. Default-off and channel-less
+    callers (background/scheduled tasks) skip this entirely - byte-identical."""
+    if approval_emit is None:
+        return None
+    try:
+        from src.settings import load_settings
+
+        if not bool(load_settings().get("approvals_enabled", False)):
+            return None
+        from src.tool_security import policy_for
+
+        if not policy_for(tool).requires_approval:
+            return None
+        from src.approval_broker import request_approval
+
+        decision = await request_approval(
+            tool, owner, str(content or "")[:500],
+            emit=approval_emit, session_id=session_id,
+        )
+        if not decision.approved:
+            return (
+                f"{tool}: BLOCKED",
+                {"error": f"Tool '{tool}' was not approved by the user.", "exit_code": 1},
+            )
+        return None
+    except Exception:
+        # Fail closed: if the approval machinery errors while enabled, deny.
+        return (
+            f"{tool}: BLOCKED",
+            {"error": f"Tool '{tool}' approval could not be obtained.", "exit_code": 1},
+        )
+
+
 async def execute_tool_block(
     block: Any,
     session_id: Optional[str] = None,
     disabled_tools: Optional[set] = None,
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    approval_emit: Optional[Callable[[Dict], Awaitable[None]]] = None,
 ) -> Tuple[str, Dict]:
-    """Execute a single tool block and append an audit record (Phase 1.3b).
+    """Execute a single tool block, with optional human approval, and append an
+    audit record (Phase 1.3a/1.3b).
 
-    Thin wrapper over `_execute_tool_block_impl`: it observes the returned
-    (description, result) and records one append-only audit line (tool, owner,
-    outcome, sha256 args hash). Auditing is best-effort and never alters the
-    result or breaks execution."""
-    desc, result = await _execute_tool_block_impl(
-        block, session_id, disabled_tools, owner, progress_cb
-    )
+    Thin wrapper over `_execute_tool_block_impl`: when approvals are enabled and
+    an `approval_emit` channel is supplied, a privileged tool pauses for an
+    approve/deny decision (fail-closed) before running. It then records one
+    append-only audit line (tool, owner, outcome, sha256 args hash). Approval and
+    auditing are best-effort and never alter the result on the default-off path."""
+    tool = getattr(block, "tool_type", None)
+    content = getattr(block, "content", None)
+
+    blocked = await _approval_blocked(tool, owner, content, session_id, approval_emit)
+    if blocked is not None:
+        desc, result = blocked
+    else:
+        desc, result = await _execute_tool_block_impl(
+            block, session_id, disabled_tools, owner, progress_cb
+        )
     try:
         from src.audit_log import record as _audit_record
 
