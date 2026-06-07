@@ -4,6 +4,15 @@ tool_execution.py
 Tool dispatcher and result formatter for the agent loop.
 Routes tool blocks to MCP servers or native implementations.
 
+Security model (see SECURITY.md for the full threat model):
+- Capability gate: privileged tools are admin-only; unregistered / mcp__* tools
+  default-deny (src/tool_security.py).
+- Sandboxed execution: bash/python run through the sandbox by default, in a
+  per-session workspace, and fail closed if an explicitly-named backend is
+  unavailable (_sandbox_backend / _run_sandboxed; src/sandbox/).
+- Secret redaction: format_tool_result redacts known secrets before any tool
+  output re-enters the model context (src/redaction.py).
+
 Extracted from agent_tools.py.
 """
 
