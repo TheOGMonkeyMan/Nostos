@@ -8,17 +8,15 @@ Each service:
 - Can run in-process or as a standalone HTTP service
 """
 
-from .search import SearchService, SearchResult, SearchResponse
+# Search lives in src.search (canonical); the services.search duplicate was
+# collapsed in Phase 2.1 (ADR-028). Its SearchService/SearchResult/SearchResponse
+# wrapper was unused (re-exported here only), so it was removed with the dupe.
 from .docs import DocsService, DocChunk, IndexResult
 from .research import ResearchService, ResearchResult, ResearchSource
 from .memory import MemoryService, Memory, MemorySearchResult
 from .shell import ShellService, ShellResult
 
 __all__ = [
-    # Search
-    "SearchService",
-    "SearchResult",
-    "SearchResponse",
     # Docs
     "DocsService",
     "DocChunk",

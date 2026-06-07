@@ -78,6 +78,10 @@ jobs:
         continue-on-error: true
         run: mypy app.py src core services routes mcp_servers
 
+      # Gate: no module duplicated under both src/ and services/ (ADR-028).
+      - name: No src/services duplicate modules
+        run: python scripts/check_no_dupes.py
+
       # Gate: tests must pass. Coverage is collected here but NON-gating (no
       # --cov-fail-under), establishing a baseline to ratchet later (0.6 / §12).
       # Baseline at adoption: ~11% over src/core/services/routes/mcp_servers.

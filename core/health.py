@@ -59,7 +59,7 @@ def _check_vector_store() -> Dict[str, str]:
 
 def _check_search() -> Dict[str, str]:
     """Report whether the search subsystem is importable (non-networked)."""
-    return {"status": "ok" if _module_available("services.search") else "unavailable"}
+    return {"status": "ok" if _module_available("src.search") else "unavailable"}
 
 
 def check_health() -> Dict[str, Any]:

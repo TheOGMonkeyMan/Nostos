@@ -7,9 +7,12 @@ from fastapi import APIRouter, Request
 
 import time
 
-from services.search import get_search_config, comprehensive_web_search, PROVIDER_INFO
-from services.search.core import _call_provider
-from services.search.providers import _get_provider_key, _get_search_instance
+# Canonical search package is src.search (Phase 2.1 / ADR-028 - the
+# services.search duplicate was collapsed into it). src.search is the
+# security-tested copy used by the agent's web_search/web_fetch tools.
+from src.search import get_search_config, comprehensive_web_search, PROVIDER_INFO
+from src.search.core import _call_provider
+from src.search.providers import _get_provider_key, _get_search_instance
 
 logger = logging.getLogger(__name__)
 

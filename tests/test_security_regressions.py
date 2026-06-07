@@ -488,34 +488,13 @@ def test_auth_manager_migrates_legacy_admin_role(tmp_path):
     assert data["users"]["admin"]["is_admin"] is True
 
 
-def _load_search_content_for_test(monkeypatch, name="services.search.content_under_test"):
-    import importlib.util
-    import types as _types
+def _load_search_content_for_test(monkeypatch, name="src.search.content"):
+    # Canonical SSRF-guard module after the Phase 2.1 search dedup (ADR-028):
+    # `src.search.content` is the single live copy (the `services.search`
+    # duplicate was collapsed into it). Tests below mutate it via monkeypatch,
+    # which auto-restores after each test.
+    from src.search import content
 
-    services_pkg = _types.ModuleType("services")
-    services_pkg.__path__ = []
-    search_pkg = _types.ModuleType("services.search")
-    search_pkg.__path__ = []
-    analytics = _types.ModuleType("services.search.analytics")
-    analytics.RateLimitError = RuntimeError
-    analytics.error_logger = _types.SimpleNamespace(error=lambda *a, **k: None)
-    cache = _types.ModuleType("services.search.cache")
-    cache.CONTENT_CACHE_DIR = Path("/tmp/odysseus-test-content-cache")
-    cache.content_cache_index = {}
-    cache.generate_cache_key = lambda url: "test-cache-key"
-    cache.cleanup_cache = lambda: None
-
-    monkeypatch.setitem(sys.modules, "services", services_pkg)
-    monkeypatch.setitem(sys.modules, "services.search", search_pkg)
-    monkeypatch.setitem(sys.modules, "services.search.analytics", analytics)
-    monkeypatch.setitem(sys.modules, "services.search.cache", cache)
-
-    spec = importlib.util.spec_from_file_location(
-        name,
-        Path(__file__).resolve().parent.parent / "services" / "search" / "content.py",
-    )
-    content = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(content)
     return content
 
 
