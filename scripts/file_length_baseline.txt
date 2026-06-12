@@ -1,7 +1,7 @@
 # file-length ratchet baseline — paths already over the cap, pinned to
 # their current line count. They may SHRINK but not GROW; new files must
 # stay <= 1500. Regenerate with: python scripts/check_file_length.py --write-baseline
-src/builtin_actions.py 2258
+src/builtin_actions.py 2048
 src/task_scheduler.py 2177
 src/agent_loop.py 2113
 routes/cookbook_routes.py 1957
