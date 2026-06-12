@@ -3,7 +3,6 @@
 # stay <= 1500. Regenerate with: python scripts/check_file_length.py --write-baseline
 src/task_scheduler.py 2021
 src/agent_loop.py 2113
-routes/cookbook_routes.py 1807
 src/visual_report.py 1833
 src/ai_interaction.py 1807
 core/database.py 1803
