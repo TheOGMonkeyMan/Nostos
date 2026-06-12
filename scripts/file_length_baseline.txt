@@ -9,4 +9,3 @@ core/database.py 1803
 routes/gallery_routes.py 1763
 routes/document_routes.py 1659
 mcp_servers/email_server.py 1591
-routes/skills_routes.py 1530
