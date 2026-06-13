@@ -51,9 +51,9 @@ def _check_providers() -> Dict[str, Any]:
 
 
 def _check_vector_store() -> Dict[str, str]:
-    """Report whether the embedding backend is installed. NON-networked: a live
-    probe of the standalone chromadb service (ADR-005, slated for removal) could
-    hang, which a health endpoint must never do."""
+    """Report whether the embedding backend is installed. NON-networked: the
+    vector store is now embedded LanceDB (no standalone service to probe, ADR-065),
+    and a health endpoint must never hang on a network call regardless."""
     return {"status": "ok" if _module_available("fastembed") else "unavailable"}
 
 

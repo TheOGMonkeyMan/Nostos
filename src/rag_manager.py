@@ -24,7 +24,7 @@ class RAGManager:
     Most methods delegate directly to VectorRAG.
     """
     
-    def __init__(self, persist_directory: str = "data/chroma"):
+    def __init__(self, persist_directory: str = "data/rag"):
         """Initialize the RAGManager with VectorRAG."""
         self.vector_rag = VectorRAG(persist_directory=persist_directory)
         logger.info("RAGManager initialized as wrapper for VectorRAG")

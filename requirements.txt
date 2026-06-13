@@ -14,12 +14,10 @@ numpy
 # selection. Used on core agent paths, so installed by default — the app
 # still degrades to keyword fallback if they're ever missing.
 # lancedb is the embedded, file-based vector store (Phase 2.5) — no separate
-# service. It backs the semantic-memory store; the document RAG is migrating to
-# it next, after which chromadb-client + the ChromaDB service are dropped.
-# chromadb-client is the lightweight HTTP client (talks to a standalone
-# ChromaDB service); fastembed runs local ONNX embeddings.
+# service. It backs all three vector subsystems (semantic memory, document RAG,
+# and the tool-selection index); ChromaDB and its standalone service were dropped
+# in ADR-065. fastembed runs local ONNX embeddings.
 lancedb
-chromadb-client
 fastembed
 youtube-transcript-api
 # Markdown rendering for research reports (src/visual_report.py).

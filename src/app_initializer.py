@@ -67,7 +67,7 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
                     logger.info(f"Rebuilt memory vector index from {len(existing)} existing entries")
             logger.info("MemoryVectorStore initialized")
         else:
-            logger.warning("MemoryVectorStore DEGRADED: ChromaDB vector memory unavailable")
+            logger.warning("MemoryVectorStore DEGRADED: vector memory unavailable")
             memory_vector = None
     except Exception as e:
         logger.warning(f"MemoryVectorStore DEGRADED: {e}")

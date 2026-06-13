@@ -24,8 +24,6 @@ services:
       - .env
     environment:
       - SEARXNG_INSTANCE=http://searxng:8080
-      - CHROMADB_HOST=chromadb
-      - CHROMADB_PORT=8000
       # PUID / PGID — the user/group the container drops to before
       # running uvicorn (entrypoint also chowns /app/data + /app/logs
       # to match, so bind-mounted files stay editable from the host).
@@ -39,18 +37,6 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
-      chromadb:
-        condition: service_started
-    restart: unless-stopped
-
-  chromadb:
-    image: docker.io/chromadb/chroma:latest
-    ports:
-      - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
-    volumes:
-      - chromadb-data:/chroma/chroma
-    environment:
-      - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
 
   searxng:
@@ -97,5 +83,4 @@ services:
 
 volumes:
   searxng-data:
-  chromadb-data:
   ntfy-cache:

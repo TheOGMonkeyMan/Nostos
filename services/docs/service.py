@@ -34,7 +34,7 @@ class DocsService:
         results = await service.query("what is async await?")
     """
 
-    def __init__(self, persist_dir: str = "data/chroma"):
+    def __init__(self, persist_dir: str = "data/rag"):
         self.rag = RAGManager(persist_directory=persist_dir)
 
     async def query(self, query: str, top_k: int = 5) -> List[DocChunk]:

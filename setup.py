@@ -20,7 +20,6 @@ DIRS = [
     os.path.join(DATA_DIR, "tts_cache"),
     os.path.join(DATA_DIR, "generated_images"),
     os.path.join(DATA_DIR, "deep_research"),
-    os.path.join(DATA_DIR, "chroma"),
     os.path.join(DATA_DIR, "rag"),
     os.path.join(DATA_DIR, "memory_vectors"),
     os.path.join(BASE_DIR, "logs"),

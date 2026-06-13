@@ -91,7 +91,7 @@ def setup_admin_wipe_routes(session_manager):
                 db.commit()
                 _wipe_memory_files()
                 # Drop the vector store too so semantic search doesn't
-                # return ghosts. Lazy import — chromadb may not be
+                # return ghosts. Lazy import — the vector store may not be
                 # initialised in every deployment.
                 try:
                     from src.memory_vector import get_memory_vector_store

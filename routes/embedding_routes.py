@@ -276,13 +276,6 @@ def setup_embedding_routes():
         except Exception:
             pass
 
-        # Reset ChromaDB client (collections will be recreated with new embeddings)
-        try:
-            from src.chroma_client import reset_client
-            reset_client()
-        except Exception:
-            pass
-
         logger.info(f"Custom embedding endpoint set: {url}")
         return {"success": True, "url": url, "model": model}
 
@@ -303,13 +296,6 @@ def setup_embedding_routes():
         try:
             from src.embeddings import reset_http_embed_state
             reset_http_embed_state()
-        except Exception:
-            pass
-
-        # Reset ChromaDB client
-        try:
-            from src.chroma_client import reset_client
-            reset_client()
         except Exception:
             pass
 
