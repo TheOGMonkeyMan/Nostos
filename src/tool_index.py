@@ -2,7 +2,7 @@
 RAG-based tool selection for agent mode.
 
 Instead of injecting all tool descriptions into the system prompt,
-embed them in a ChromaDB collection and retrieve only the top-K
+embed them in an embedded LanceDB table and retrieve only the top-K
 relevant ones per user message.
 """
 

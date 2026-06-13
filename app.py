@@ -436,15 +436,11 @@ from services.youtube import init_youtube
 init_youtube()
 
 # ========= RAG (vector document RAG) =========
-# VectorRAG (ChromaDB-backed personal-document semantic search). Initialized
-# lazily via get_rag_manager() — returns None if ChromaDB isn't reachable
-# (no server running on the configured host:port), in which case personal-doc
-# routes return a clean 503 instead of busy-retrying every request.
-#
-# Note: this was previously hardcoded off because chromadb 1.4.1 / pydantic
-# 2.12 were mutually incompatible at the time. With the current pins
-# (chromadb 1.5.x + pydantic 2.13.x) the init works and Personal Docs
-# (POST /api/personal/add_directory etc.) is functional again.
+# VectorRAG (embedded-LanceDB personal-document semantic search). Initialized
+# lazily via get_rag_manager() — returns None if the embedding backend isn't
+# available, in which case personal-doc routes return a clean 503 instead of
+# busy-retrying every request. The vector store is now embedded LanceDB
+# (ADR-065), so there is no separate service to reach.
 from src.rag_singleton import get_rag_manager
 rag_manager = get_rag_manager()
 rag_available = rag_manager is not None
@@ -453,7 +449,7 @@ if rag_available:
 else:
     logger.info(
         "Vector document RAG not available at startup "
-        "(ChromaDB may not be reachable yet — routes will retry lazily)"
+        "(embedding backend may not be ready yet — routes will retry lazily)"
     )
 
 # ========= IMPORT CONFIG =========
@@ -798,8 +794,8 @@ async def startup_event():
     _startup_tasks.append(asyncio.create_task(_startup_mcp_connections()))
 
     # Pre-warm the RAG tool index off the request path. Loading the local
-    # embedding model + opening ChromaDB + indexing the built-in tools is a
-    # one-time ~1-3s cost that otherwise lands on the user's FIRST message
+    # embedding model + opening the LanceDB index + indexing the built-in tools
+    # is a one-time ~1-3s cost that otherwise lands on the user's FIRST message
     # (showing up as a big `tool_selection` time). Doing it here makes the
     # first turn as fast as subsequent ones (warm embed ≈ a few ms).
     async def _warmup_tool_index():

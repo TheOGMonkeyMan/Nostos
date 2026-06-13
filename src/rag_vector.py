@@ -42,7 +42,7 @@ def _esc(value: str) -> str:
 class VectorRAG:
     """RAG system using embedded LanceDB vector storage with hybrid search."""
 
-    def __init__(self, persist_directory: str = "data/chroma", embedding_model=None):
+    def __init__(self, persist_directory: str = "data/rag", embedding_model=None):
         self.persist_directory = persist_directory
         self._db = None
         self._table = None

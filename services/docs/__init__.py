@@ -1,5 +1,5 @@
 # services/docs/__init__.py
-"""Docs service — personal document RAG with ChromaDB.
+"""Docs service — personal document RAG with embedded LanceDB.
 
 Thin facade: DocsService lives here, RAGManager/VectorRAG are re-exported
 from the canonical implementations in src/.
