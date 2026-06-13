@@ -699,68 +699,8 @@ app.include_router(setup_contacts_routes())
 
 # ========= ROUTES (kept in app.py) =========
 
-def _serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
-    """Read an HTML file and inject the CSP nonce into inline <script> tags."""
-    with open(file_path, "r", encoding="utf-8") as f:
-        html = f.read()
-    nonce = getattr(request.state, "csp_nonce", "")
-    html = html.replace("{{CSP_NONCE}}", nonce)
-    return HTMLResponse(html)
-
-@app.get("/")
-async def serve_index(request: Request):
-    static_path = abs_join(BASE_DIR, "static/index.html")
-    if os.path.exists(static_path):
-        return _serve_html_with_nonce(request, static_path)
-    root_path = abs_join(BASE_DIR, "index.html")
-    if os.path.exists(root_path):
-        return _serve_html_with_nonce(request, root_path)
-    raise HTTPException(404, "index.html not found")
-
-@app.get("/notes")
-async def serve_notes(request: Request):
-    return await serve_index(request)
-
-@app.get("/calendar")
-async def serve_calendar(request: Request):
-    return await serve_index(request)
-
-# Per-tool deep-link routes — all serve the same SPA, the JS auto-opens
-# the matching modal based on window.location.pathname. Each route also
-# gets a unique favicon + page title via inline script in index.html so
-# bookmarks render with tool-specific icons.
-@app.get("/cookbook")
-async def serve_cookbook(request: Request):
-    return await serve_index(request)
-
-@app.get("/email")
-async def serve_email(request: Request):
-    return await serve_index(request)
-
-@app.get("/memory")
-async def serve_memory(request: Request):
-    return await serve_index(request)
-
-@app.get("/gallery")
-async def serve_gallery(request: Request):
-    return await serve_index(request)
-
-@app.get("/tasks")
-async def serve_tasks(request: Request):
-    return await serve_index(request)
-
-@app.get("/library")
-async def serve_library(request: Request):
-    return await serve_index(request)
-
-@app.get("/backgrounds")
-async def serve_backgrounds(request: Request):
-    """Sandbox page for prototyping background effects. No auth required."""
-    return _serve_html_with_nonce(request, abs_join(BASE_DIR, "static/backgrounds.html"))
-
-@app.get("/login")
-async def serve_login(request: Request):
-    return _serve_html_with_nonce(request, abs_join(BASE_DIR, "static/login.html"))
+from routes.page_routes import setup_page_routes
+app.include_router(setup_page_routes())
 
 @app.get("/api/version")
 async def get_version():
