@@ -6,5 +6,4 @@ src/agent_loop.py 2113
 src/visual_report.py 1833
 src/ai_interaction.py 1807
 core/database.py 1803
-routes/gallery_routes.py 1763
 mcp_servers/email_server.py 1591
