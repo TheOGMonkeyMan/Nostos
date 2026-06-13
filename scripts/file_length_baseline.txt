@@ -2,5 +2,5 @@
 # their current line count. They may SHRINK but not GROW; new files must
 # stay <= 1500. Regenerate with: python scripts/check_file_length.py --write-baseline
 src/task_scheduler.py 2021
-src/ai_interaction.py 1807
+src/ai_interaction.py 1622
 core/database.py 1803
