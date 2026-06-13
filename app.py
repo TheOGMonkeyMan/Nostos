@@ -698,46 +698,8 @@ app.include_router(setup_contacts_routes())
 from routes.page_routes import setup_page_routes
 app.include_router(setup_page_routes())
 
-@app.get("/api/version")
-async def get_version():
-    from core.constants import APP_VERSION
-    return {"version": APP_VERSION}
-
-@app.get("/api/health")
-async def health_check() -> Dict[str, str]:
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-@app.get("/healthz")
-async def healthz():
-    """Readiness probe: per-component status (db, vector store, search,
-    providers). No auth, lightweight, non-networked. Returns 503 only when the
-    database (the hard dependency) is unreachable so orchestrators can gate on
-    it; otherwise 200 with overall status ok|degraded. Logic lives in
-    core.health so the handler stays thin (engineering-standards)."""
-    from core.health import check_health
-    report = check_health()
-    code = 503 if report["status"] == "error" else 200
-    return _JSONResponse(report, status_code=code)
-
-@app.get("/api/runtime")
-async def runtime_info() -> Dict[str, object]:
-    in_docker = os.path.exists("/.dockerenv")
-    if not in_docker:
-        try:
-            with open("/proc/1/cgroup", "r", encoding="utf-8", errors="ignore") as fh:
-                cg = fh.read()
-            in_docker = any(marker in cg for marker in ("docker", "containerd", "kubepods"))
-        except Exception:
-            in_docker = False
-    ollama_url = (
-        os.getenv("OLLAMA_BASE_URL")
-        or os.getenv("OLLAMA_URL")
-        or ("http://host.docker.internal:11434/v1" if in_docker else "http://127.0.0.1:11434/v1")
-    )
-    return {
-        "in_docker": in_docker,
-        "ollama_base_url": ollama_url,
-    }
+from routes.status_routes import setup_status_routes
+app.include_router(setup_status_routes())
 
 # ========= LIFECYCLE =========
 
