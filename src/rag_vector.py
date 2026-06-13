@@ -1,13 +1,21 @@
 """
 rag_vector.py
 
-Vector-based RAG using ChromaDB for storage and API-based embeddings.
-Features: persistent storage, hybrid search (vector + keyword), sentence-aware chunking,
-configurable embedding endpoint via EMBEDDING_URL env var.
+Vector-based RAG using embedded LanceDB for storage and API-based embeddings
+(Phase 2.5, ADR-063 - migrated off the standalone ChromaDB service to a local,
+file-based LanceDB table; no separate container).
+Features: persistent storage, hybrid search (vector + keyword), sentence-aware
+chunking, configurable embedding endpoint via EMBEDDING_URL env var.
+
+Arbitrary per-document metadata is preserved verbatim in a `metadata_json` column;
+the fields actually filtered on (owner / source / directory) are mirrored into typed
+columns so they can be pushed down into LanceDB SQL `where` clauses. LanceDB cosine
+distance == 1 - cosine_similarity, so the scores match the previous backend.
 """
 
 import os
 import re
+import json
 import logging
 import numpy as np
 from typing import List, Dict, Any, Optional, Set
@@ -23,16 +31,22 @@ DEFAULT_FILE_EXTENSIONS: Set[str] = {
 VECTOR_WEIGHT = 0.7
 KEYWORD_WEIGHT = 0.3
 
-COLLECTION_NAME = "odysseus_rag"
+TABLE_NAME = "odysseus_rag"
+
+
+def _esc(value: str) -> str:
+    """Escape single quotes for a LanceDB SQL filter literal."""
+    return str(value).replace("'", "''")
 
 
 class VectorRAG:
-    """RAG system using ChromaDB vector storage with hybrid search."""
+    """RAG system using embedded LanceDB vector storage with hybrid search."""
 
-    def __init__(self, persist_directory: str = "data/chroma"):
+    def __init__(self, persist_directory: str = "data/chroma", embedding_model=None):
         self.persist_directory = persist_directory
-        self._collection = None
-        self._model = None
+        self._db = None
+        self._table = None
+        self._model = embedding_model
         self._healthy = False
 
         Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
@@ -44,21 +58,19 @@ class VectorRAG:
 
     def _initialize_system(self) -> bool:
         try:
-            from src.chroma_client import get_chroma_client
-            from src.embeddings import get_embedding_client
+            import lancedb
 
-            self._model = get_embedding_client()
+            if self._model is None:
+                from src.embeddings import get_embedding_client
+                self._model = get_embedding_client()
             if self._model is None:
                 raise RuntimeError("No embedding backend available")
             logger.info(f"Embedding: {self._model.url} model={self._model.model}")
 
-            client = get_chroma_client()
-            self._collection = client.get_or_create_collection(
-                name=COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"},
-            )
+            self._db = lancedb.connect(self.persist_directory)
+            self._table = self._open_existing()
 
-            count = self._collection.count()
+            count = self.get_count()
             logger.info(f"VectorRAG ready ({count} docs)")
             self._healthy = True
             return True
@@ -68,9 +80,35 @@ class VectorRAG:
             self._healthy = False
             return False
 
+    def _open_existing(self):
+        """Open the table if it already exists, else None (created on first write)."""
+        try:
+            return self._db.open_table(TABLE_NAME)
+        except Exception:
+            return None
+
     def _embed(self, texts: List[str]) -> List[List[float]]:
         vecs = self._model.encode(texts, normalize_embeddings=True)
         return np.array(vecs, dtype=np.float32).tolist()
+
+    def _row(self, doc_id: str, text: str, vector: List[float], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a table row: filterable columns mirror metadata; metadata_json keeps
+        the full original dict for verbatim round-trip on read."""
+        return {
+            "id": doc_id,
+            "text": text,
+            "vector": vector,
+            "owner": str(metadata.get("owner", "")),
+            "source": str(metadata.get("source", "")),
+            "directory": str(metadata.get("directory", "")),
+            "metadata_json": json.dumps(metadata),
+        }
+
+    def get_count(self) -> int:
+        return self._table.count_rows() if self._table is not None else 0
+
+    def _exists(self, doc_id: str) -> bool:
+        return self._table is not None and self._table.count_rows(f"id = '{_esc(doc_id)}'") > 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -78,12 +116,13 @@ class VectorRAG:
 
     @property
     def healthy(self) -> bool:
-        return self._healthy and self._collection is not None
+        return self._healthy
 
     @property
     def collection(self):
-        """Expose the ChromaDB collection for direct access by personal_routes etc."""
-        return self._collection
+        """Vestigial accessor (was the ChromaDB collection). Returns the LanceDB
+        table; retained only for backward compatibility - nothing reads it."""
+        return self._table
 
     # ------------------------------------------------------------------
     # Document operations
@@ -100,17 +139,14 @@ class VectorRAG:
 
         try:
             doc_id = f"doc_{hash(text) % 10**16}"
-            # Check if already exists
-            existing = self._collection.get(ids=[doc_id])
-            if existing["ids"]:
+            if self._exists(doc_id):
                 return True  # already exists
-            embeddings = self._embed([text])
-            self._collection.add(
-                ids=[doc_id],
-                embeddings=embeddings,
-                documents=[text],
-                metadatas=[metadata],
-            )
+            vector = self._embed([text])[0]
+            row = self._row(doc_id, text, vector, metadata)
+            if self._table is None:
+                self._table = self._db.create_table(TABLE_NAME, data=[row])
+            else:
+                self._table.add([row])
             return True
         except Exception as e:
             logger.error(f"add_document failed: {e}")
@@ -130,35 +166,41 @@ class VectorRAG:
             return {"success": False, "message": "No valid documents"}
 
         try:
-            # Get existing IDs to avoid duplicates
-            new_texts = []
-            new_metas = []
-            new_ids = []
+            # Collect new, de-duplicated rows (skip ids already stored or repeated
+            # within this batch - LanceDB has no unique-id constraint).
+            new_rows: List[Dict[str, Any]] = []
+            seen_ids = set()
+            new_texts: List[str] = []
+            new_metas: List[Dict[str, Any]] = []
+            new_ids: List[str] = []
             for t, m in valid:
                 doc_id = f"doc_{hash(t) % 10**16}"
-                existing = self._collection.get(ids=[doc_id])
-                if not existing["ids"]:
-                    new_texts.append(t)
-                    new_metas.append(m)
-                    new_ids.append(doc_id)
+                if doc_id in seen_ids or self._exists(doc_id):
+                    continue
+                seen_ids.add(doc_id)
+                new_texts.append(t)
+                new_metas.append(m)
+                new_ids.append(doc_id)
 
             if new_texts:
-                # Batch in chunks of 100
+                # Batch in chunks of 100 to bound embedding memory.
                 for i in range(0, len(new_texts), 100):
                     batch_texts = new_texts[i:i + 100]
                     batch_ids = new_ids[i:i + 100]
                     batch_metas = new_metas[i:i + 100]
                     embeddings = self._embed(batch_texts)
-                    self._collection.add(
-                        ids=batch_ids,
-                        embeddings=embeddings,
-                        documents=batch_texts,
-                        metadatas=batch_metas,
-                    )
+                    for did, txt, mta, vec in zip(batch_ids, batch_texts, batch_metas, embeddings):
+                        new_rows.append(self._row(did, txt, vec, mta))
+
+            if new_rows:
+                if self._table is None:
+                    self._table = self._db.create_table(TABLE_NAME, data=new_rows)
+                else:
+                    self._table.add(new_rows)
 
             return {
                 "success": True,
-                "added_count": len(new_texts),
+                "added_count": len(new_ids),
                 "total_count": len(docs),
                 "failed_count": len(docs) - len(valid),
             }
@@ -175,37 +217,34 @@ class VectorRAG:
             return []
         if not query or not isinstance(query, str):
             return []
-        if self._collection.count() == 0:
+        count = self.get_count()
+        if count == 0:
             return []
 
         try:
             # Fetch extra candidates when owner-filtering
-            fetch_k = min(k * 3, max(k, 20), self._collection.count())
+            fetch_k = min(k * 3, max(k, 20), count)
             if owner:
-                fetch_k = min(fetch_k * 2, self._collection.count())
+                fetch_k = min(fetch_k * 2, count)
 
-            query_embeddings = self._embed([query])
+            query_vector = self._embed([query])[0]
 
-            # Use ChromaDB where filter for owner if specified
-            where_filter = {"owner": owner} if owner else None
-
-            results = self._collection.query(
-                query_embeddings=query_embeddings,
-                n_results=fetch_k,
-                where=where_filter,
-                include=["documents", "metadatas", "distances"],
-            )
+            # Push the owner filter into LanceDB (prefilter so we still get fetch_k hits).
+            builder = self._table.search(query_vector)
+            if owner:
+                builder = builder.where(f"owner = '{_esc(owner)}'", prefilter=True)
+            results = builder.metric("cosine").limit(fetch_k).to_list()
 
             query_words = set(query.lower().split())
             candidates = []
 
-            for idx in range(len(results["ids"][0])):
-                doc_id = results["ids"][0][idx]
-                distance = results["distances"][0][idx]
-                doc_text = results["documents"][0][idx]
-                meta = results["metadatas"][0][idx]
+            for r in results:
+                doc_id = r["id"]
+                distance = r["_distance"]
+                doc_text = r["text"]
+                meta = json.loads(r["metadata_json"])
 
-                # ChromaDB cosine distance = 1 - cosine_similarity
+                # LanceDB cosine distance = 1 - cosine_similarity
                 vector_sim = 1.0 - distance
 
                 # Keyword overlap score
@@ -236,27 +275,31 @@ class VectorRAG:
 
     def _keyword_search_fallback(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
-            if self._collection.count() == 0:
+            count = self.get_count()
+            if count == 0:
                 return []
 
-            # Fetch all documents for keyword search fallback
-            all_docs = self._collection.get(include=["documents", "metadatas"])
-            if not all_docs["ids"]:
+            # Full scan: a vector search with limit=count returns every row (ordering
+            # is irrelevant here - we re-score by keyword overlap below).
+            probe = self._embed([query])[0]
+            all_docs = self._table.search(probe).limit(count).to_list()
+            if not all_docs:
                 return []
 
             query_words = query.lower().split()
             scored = []
-            for i, doc in enumerate(all_docs["documents"]):
-                meta = all_docs["metadatas"][i]
+            for r in all_docs:
+                meta = json.loads(r["metadata_json"])
                 if owner:
                     doc_owner = meta.get("owner")
                     if doc_owner and doc_owner != owner:
                         continue
+                doc = r["text"]
                 doc_lower = doc.lower()
                 score = sum(1 for w in query_words if w in doc_lower)
                 if score > 0:
                     scored.append({
-                        "id": all_docs["ids"][i],
+                        "id": r["id"],
                         "document": doc,
                         "metadata": meta,
                         "distance": 0,
@@ -276,16 +319,13 @@ class VectorRAG:
 
     def rebuild_index(self) -> bool:
         try:
-            from src.chroma_client import get_chroma_client
-            client = get_chroma_client()
+            if self._db is None:
+                return False
             try:
-                client.delete_collection(COLLECTION_NAME)
+                self._db.drop_table(TABLE_NAME)
             except Exception:
                 pass
-            self._collection = client.get_or_create_collection(
-                name=COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"},
-            )
+            self._table = None  # recreated lazily on the next write
             self._healthy = True
             return True
         except Exception as e:
@@ -298,10 +338,10 @@ class VectorRAG:
             return {"error": "Collection not initialized"}
         try:
             return {
-                "document_count": self._collection.count(),
+                "document_count": self.get_count(),
                 "embedding_model": f"{self._model.model} @ {self._model.url}" if self._model else "N/A",
                 "persist_directory": self.persist_directory,
-                "collection_name": COLLECTION_NAME,
+                "collection_name": TABLE_NAME,
                 "healthy": True,
             }
         except Exception as e:
@@ -369,20 +409,22 @@ class VectorRAG:
             return {'success': False, 'indexed_count': indexed, 'failed_count': failed, 'message': str(e)}
 
     def remove_directory(self, directory: str) -> Dict[str, Any]:
-        """Remove all chunks from a directory. O(1) per chunk via ChromaDB."""
-        if not self.healthy:
-            return {"success": False, "message": "Collection not initialized"}
+        """Remove all chunks from a directory. O(1) per chunk via a LanceDB filter."""
+        if not self.healthy or self._table is None:
+            return {"success": False, "message": "Collection not initialized"} if not self.healthy \
+                else {"success": True, "removed_count": 0, "message": "No docs found"}
         try:
-            # Use ChromaDB where filter to find all docs from this directory
-            results = self._collection.get(
-                where={"source": {"$contains": directory}} if "/" in directory else {"directory": directory},
-                include=["metadatas"],
-            )
-            if not results['ids']:
+            # Match the prior semantics: substring match on source when the directory
+            # looks like a path, else an exact directory-column match.
+            if "/" in directory:
+                where = f"source LIKE '%{_esc(directory)}%'"
+            else:
+                where = f"directory = '{_esc(directory)}'"
+            n = self._table.count_rows(where)
+            if n == 0:
                 return {"success": True, "removed_count": 0, "message": "No docs found"}
 
-            self._collection.delete(ids=results['ids'])
-            n = len(results['ids'])
+            self._table.delete(where)
             logger.info(f"Removed {n} chunks from {directory}")
             return {"success": True, "removed_count": n, "message": f"Removed {n} chunks"}
         except Exception as e:
@@ -471,19 +513,16 @@ class VectorRAG:
     def delete_by_source(self, source: str) -> int:
         """Remove all chunks whose metadata['source'] matches *source*.
         Returns the number of removed chunks."""
-        if not self.healthy:
+        if not self.healthy or self._table is None:
             return 0
         try:
-            results = self._collection.get(
-                where={"source": source},
-                include=[],
-            )
-            ids = results.get("ids", [])
-            if not ids:
+            where = f"source = '{_esc(source)}'"
+            n = self._table.count_rows(where)
+            if n == 0:
                 return 0
-            self._collection.delete(ids=ids)
-            logger.info(f"Deleted {len(ids)} chunks for source={source}")
-            return len(ids)
+            self._table.delete(where)
+            logger.info(f"Deleted {n} chunks for source={source}")
+            return n
         except Exception as e:
             logger.error(f"delete_by_source failed: {e}")
             return 0
