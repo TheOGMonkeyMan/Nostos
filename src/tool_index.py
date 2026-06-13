@@ -8,6 +8,7 @@ relevant ones per user message.
 
 import logging
 import hashlib
+import os
 import re
 import time
 from typing import Dict, List, Optional, Set
@@ -122,25 +123,57 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
 
 
 class ToolIndex:
-    """ChromaDB-backed tool index for RAG-based tool selection."""
+    """Embedded-LanceDB tool index for RAG-based tool selection (Phase 2.5, ADR-064)."""
 
-    def __init__(self):
-        from src.chroma_client import get_chroma_client
-        from src.embeddings import get_embedding_client
+    def __init__(self, persist_directory: Optional[str] = None, embedding_model=None):
+        import lancedb
+        from pathlib import Path
 
-        self._embedder = get_embedding_client()
+        self._embedder = embedding_model
+        if self._embedder is None:
+            from src.embeddings import get_embedding_client
+            self._embedder = get_embedding_client()
         if not self._embedder:
             raise RuntimeError("No embedding client available")
 
-        client = get_chroma_client()
-        self._collection = client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
+        if persist_directory is None:
+            persist_directory = str(Path(__file__).parent.parent / "data" / "lance_tools")
+        os.makedirs(persist_directory, exist_ok=True)
+        self._db = lancedb.connect(persist_directory)
+        self._table = self._open_existing()
         self._fingerprint = ""
         self._mcp_generation = -1
         self._healthy = True
         logger.info("ToolIndex initialized")
+
+    def _open_existing(self):
+        """Open the lance table if it exists, else None (created on first write)."""
+        try:
+            return self._db.open_table(COLLECTION_NAME)
+        except Exception:
+            return None
+
+    def get_count(self) -> int:
+        return self._table.count_rows() if self._table is not None else 0
+
+    def _row(self, doc_id, tool_name, tool_type, text, vector):
+        return {"id": doc_id, "tool_name": tool_name, "tool_type": tool_type,
+                "text": text, "vector": vector}
+
+    def _delete_type(self, tool_type: str):
+        if self._table is not None:
+            try:
+                self._table.delete(f"tool_type = '{tool_type}'")
+            except Exception as e:
+                logger.debug(f"delete tool_type={tool_type}: {e}")
+
+    def _add_rows(self, rows):
+        if not rows:
+            return
+        if self._table is None:
+            self._table = self._db.create_table(COLLECTION_NAME, data=rows)
+        else:
+            self._table.add(rows)
 
     @property
     def healthy(self):
@@ -154,40 +187,24 @@ class ToolIndex:
         return [list(v) for v in vecs]
 
     def index_builtin_tools(self):
-        """Index all built-in tool descriptions."""
-        docs = []
-        ids = []
-        metadatas = []
+        """Index all built-in tool descriptions (replaces the current builtin set)."""
+        names, ids, docs = [], [], []
         for name, desc in BUILTIN_TOOL_DESCRIPTIONS.items():
-            doc_text = f"Tool: {name}\n{desc}"
-            docs.append(doc_text)
+            names.append(name)
             ids.append(f"builtin_{name}")
-            metadatas.append({"tool_name": name, "tool_type": "builtin"})
+            docs.append(f"Tool: {name}\n{desc}")
 
         if not docs:
             return
 
-        # Drop any stale builtin_* entries that aren't in the current
-        # registry (e.g. removed tools like the old vault_* set).
-        # Without this, upsert leaves them in place and RAG keeps
-        # surfacing tools that no longer exist.
-        try:
-            existing = self._collection.get(where={"tool_type": "builtin"})
-            existing_ids = (existing or {}).get("ids") or []
-            stale = [i for i in existing_ids if i not in set(ids)]
-            if stale:
-                self._collection.delete(ids=stale)
-                logger.info(f"Pruned {len(stale)} stale builtin tool entries from index")
-        except Exception as e:
-            logger.debug(f"Stale-pruning skipped: {e}")
-
+        # Replace the whole builtin set: dropping all builtin rows then re-adding
+        # the current registry is equivalent to the prior prune-stale + upsert
+        # (and drops tools removed from the registry, e.g. the old vault_* set).
+        self._delete_type("builtin")
         embeddings = self._embed(docs)
-        self._collection.upsert(
-            ids=ids,
-            documents=docs,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
+        rows = [self._row(i, n, "builtin", d, v)
+                for i, n, d, v in zip(ids, names, docs, embeddings)]
+        self._add_rows(rows)
         self._fingerprint = hashlib.sha256(
             ",".join(sorted(BUILTIN_TOOL_DESCRIPTIONS.keys())).encode()
         ).hexdigest()
@@ -204,13 +221,8 @@ class ToolIndex:
             return
         self._mcp_generation = gen
 
-        # Remove old MCP entries
-        try:
-            existing = self._collection.get(where={"tool_type": "mcp"})
-            if existing and existing["ids"]:
-                self._collection.delete(ids=existing["ids"])
-        except Exception:
-            pass
+        # Remove old MCP entries (replaced wholesale below).
+        self._delete_type("mcp")
 
         # Get current MCP tools
         try:
@@ -221,10 +233,9 @@ class ToolIndex:
         if not all_tools:
             return
 
-        # Parse MCP tool descriptions from the prompt text
-        docs = []
-        ids = []
-        metadatas = []
+        # Parse MCP tool descriptions from the prompt text. De-dup by id (two
+        # servers may expose the same tool name; the prior upsert kept one).
+        by_id: Dict[str, tuple] = {}
         current_server = ""
         for line in all_tools.strip().split("\n"):
             line = line.strip()
@@ -240,41 +251,34 @@ class ToolIndex:
                     # Include server identity in the indexed text so RAG can
                     # distinguish "list_emails for server-a" from "list_emails for server-b"
                     server_ctx = f" (server: {current_server})" if current_server else ""
-                    doc_text = f"Tool: {name}{server_ctx}\n{desc}"
-                    docs.append(doc_text)
-                    ids.append(f"mcp_{name}")
-                    metadatas.append({"tool_name": name, "tool_type": "mcp"})
+                    by_id[f"mcp_{name}"] = (name, f"Tool: {name}{server_ctx}\n{desc}")
 
-        if not docs:
+        if not by_id:
             return
 
+        ids = list(by_id.keys())
+        names = [by_id[i][0] for i in ids]
+        docs = [by_id[i][1] for i in ids]
         embeddings = self._embed(docs)
-        self._collection.upsert(
-            ids=ids,
-            documents=docs,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
+        rows = [self._row(i, n, "mcp", d, v)
+                for i, n, d, v in zip(ids, names, docs, embeddings)]
+        self._add_rows(rows)
         logger.info(f"Indexed {len(docs)} MCP tools")
 
     def retrieve(self, query: str, k: int = 8) -> List[str]:
         """Retrieve the top-K most relevant tool names for a query."""
         try:
-            query_embedding = self._embed([query])
-            results = self._collection.query(
-                query_embeddings=query_embedding,
-                n_results=min(k, self._collection.count() or k),
-                include=["metadatas", "distances"],
-            )
-            if not results or not results.get("metadatas"):
+            count = self.get_count()
+            if count == 0:
                 return []
+            query_vector = self._embed([query])[0]
+            results = self._table.search(query_vector).metric("cosine").limit(min(k, count)).to_list()
 
             tool_names = []
-            for meta_list in results["metadatas"]:
-                for meta in meta_list:
-                    name = meta.get("tool_name", "")
-                    if name and name not in tool_names:
-                        tool_names.append(name)
+            for r in results:
+                name = r.get("tool_name", "")
+                if name and name not in tool_names:
+                    tool_names.append(name)
             return tool_names
         except Exception as e:
             logger.warning(f"Tool retrieval failed: {e}")
