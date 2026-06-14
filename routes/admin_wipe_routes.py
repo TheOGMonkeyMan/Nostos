@@ -61,10 +61,16 @@ def _rmtree_quiet(path: str):
             logger.warning(f"Could not remove {path}: {e}")
 
 
-def setup_admin_wipe_routes(session_manager):
+def setup_admin_wipe_routes(session_manager, memory_vector=None):
     """The session_manager is passed in so we can also clear its
     in-memory cache when wiping chats — without it the DB is empty
-    but the next /api/sessions returns stale entries."""
+    but the next /api/sessions returns stale entries.
+
+    memory_vector (the embedded LanceDB MemoryVectorStore, or None when the
+    vector backend is degraded/absent) is threaded in so wiping "memory" also
+    drops the semantic index. Without it, semantic search keeps surfacing
+    wiped "ghost" memories.
+    """
     router = APIRouter(prefix="/api/admin")
 
     @router.delete("/wipe/{kind}")
@@ -90,16 +96,16 @@ def setup_admin_wipe_routes(session_manager):
                 db.query(Memory).delete()
                 db.commit()
                 _wipe_memory_files()
-                # Drop the vector store too so semantic search doesn't
-                # return ghosts. Lazy import — the vector store may not be
-                # initialised in every deployment.
-                try:
-                    from src.memory_vector import get_memory_vector_store
-                    mv = get_memory_vector_store()
-                    if mv and hasattr(mv, "clear"):
-                        mv.clear()
-                except Exception as e:
-                    logger.info(f"Memory vector clear skipped: {e}")
+                # Drop the vector index too so semantic search doesn't return
+                # ghosts. rebuild([]) drops + recreates the table empty. The SQL
+                # wipe is already committed, so a vector-store hiccup must not
+                # fail the whole request (that would falsely read as "nothing
+                # wiped"); log and carry on.
+                if memory_vector is not None and memory_vector.healthy:
+                    try:
+                        memory_vector.rebuild([])
+                    except Exception as e:
+                        logger.warning(f"Memory vector clear failed: {e}")
                 return {"status": "deleted", "kind": kind, "count": count}
 
             if kind == "skills":
